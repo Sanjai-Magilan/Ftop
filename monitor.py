@@ -11,10 +11,6 @@ import psutil
 
 ASSUMED_CPU_PACKAGE_POWER_W = 65.0
 MIN_DISPLAY_POWER_W = 0.1
-
-COLOR_PAIR_LOW = 1
-COLOR_PAIR_MED = 2
-COLOR_PAIR_HIGH = 3
 NET_EMA_ALPHA = 0.35
 MIN_NET_DT = 0.25
 
@@ -126,33 +122,6 @@ def sample_network_rates(net_prev, net_prev_time: float, ema_down: float, ema_up
     return net_now, now_t, ema_down, ema_up
 
 
-def init_colors() -> bool:
-    """Initialize curses color pairs. Returns True if colors are available."""
-    try:
-        if not curses.has_colors():
-            return False
-        curses.start_color()
-        curses.use_default_colors()
-        curses.init_pair(COLOR_PAIR_LOW, curses.COLOR_GREEN, -1)
-        curses.init_pair(COLOR_PAIR_MED, curses.COLOR_YELLOW, -1)
-        curses.init_pair(COLOR_PAIR_HIGH, curses.COLOR_RED, -1)
-        return True
-    except curses.error:
-        return False
-
-
-def get_color(percent: float, colors_enabled: bool) -> int:
-    """Return color attribute for a usage percentage threshold."""
-    if not colors_enabled:
-        return 0
-
-    if percent < 50.0:
-        return curses.color_pair(COLOR_PAIR_LOW)
-    if percent <= 80.0:
-        return curses.color_pair(COLOR_PAIR_MED)
-    return curses.color_pair(COLOR_PAIR_HIGH)
-
-
 def get_top_processes(limit: int, sort_key: str, logical_cpus: int):
     procs = []
     for proc in psutil.process_iter(["pid", "name", "username", "memory_percent", "status"]):
@@ -205,8 +174,6 @@ def draw(stdscr, refresh_rate: float, proc_count: int):
         curses.curs_set(0)
     except curses.error:
         pass
-
-    colors_enabled = init_colors()
 
     stdscr.nodelay(True)
     # Poll keys frequently; refresh expensive metrics on refresh_rate cadence.
@@ -318,7 +285,6 @@ def draw(stdscr, refresh_rate: float, proc_count: int):
             0,
             f"CPU Total: {cpu_total:5.1f}%  [{progress_bar(cpu_total, bar_w)}]",
             width,
-            get_color(cpu_total, colors_enabled),
         )
         safe_addnstr(
             stdscr,
@@ -334,7 +300,6 @@ def draw(stdscr, refresh_rate: float, proc_count: int):
             0,
             f"Memory   : {mem_percent_actual:5.1f}%  {human_bytes(mem_used_actual)}/{human_bytes(mem_total_actual)}  [{progress_bar(mem_percent_actual, bar_w)}]",
             width,
-            get_color(mem_percent_actual, colors_enabled),
         )
         safe_addnstr(
             stdscr,
@@ -349,7 +314,6 @@ def draw(stdscr, refresh_rate: float, proc_count: int):
             0,
             f"Disk /   : {disk.percent:5.1f}%  {human_bytes(disk.used)}/{human_bytes(disk.total)}  [{progress_bar(disk.percent, bar_w)}]",
             width,
-            get_color(disk.percent, colors_enabled),
         )
 
         safe_addnstr(
@@ -389,8 +353,7 @@ def draw(stdscr, refresh_rate: float, proc_count: int):
             power = format_power_usage(p.get("power_watts"))
             name = (p.get("name") or "-")[: max(1, width - 46)]
             line = f"{pid:<8} {user:<14} {cpu:>5.1f}  {mem:>5.1f}  {power:>6}  {name}"
-            proc_attr = get_color(cpu, colors_enabled) if cpu >= 50.0 else 0
-            safe_addnstr(stdscr, row, 0, line, width, proc_attr)
+            safe_addnstr(stdscr, row, 0, line, width)
             row += 1
 
         help_line = "q:quit  ↑/↓ or j/k:scroll  PgUp/PgDn:page  c/m/p:sort  r:refresh"
