@@ -4,7 +4,7 @@ import os
 import socket
 import time
 from datetime import datetime
-from typing import Optional
+from typing import Dict, Optional
 
 import psutil
 
@@ -15,13 +15,13 @@ NET_EMA_ALPHA = 0.35
 MIN_NET_DT = 0.25
 
 
-def human_bytes(value: float) -> str:
+def human_bytes(value: float, decimals: int = 1) -> str:
     units = ["B", "KB", "MB", "GB", "TB", "PB"]
     i = 0
     while value >= 1024 and i < len(units) - 1:
         value /= 1024
         i += 1
-    return f"{value:.1f}{units[i]}"
+    return f"{value:.{decimals}f}{units[i]}"
 
 
 def human_uptime(seconds: float) -> str:
@@ -86,14 +86,50 @@ def sample_cpu_usage():
 
 
 def sample_memory_usage():
-    """Return Linux-like actual memory usage: used=total-free-buffers-cached."""
+    """Return Linux-like actual memory usage.
+
+    Preferred formula (as requested):
+        used = total - free - buffers - cached
+
+    On Linux we read /proc/meminfo directly for correctness. If fields are
+    missing or not on Linux, we safely fall back to psutil values.
+    """
     vm = psutil.virtual_memory()
+
     total = float(vm.total or 0)
     free = float(getattr(vm, "free", 0) or 0)
     buffers = float(getattr(vm, "buffers", 0) or 0)
     cached = float(getattr(vm, "cached", 0) or 0)
 
+    # Linux-first: source values directly from /proc/meminfo to align closely
+    # with native system semantics.
+    if os.path.exists("/proc/meminfo"):
+        meminfo: Dict[str, float] = {}
+        try:
+            with open("/proc/meminfo", "r", encoding="utf-8") as f:
+                for line in f:
+                    if ":" not in line:
+                        continue
+                    key, value_part = line.split(":", 1)
+                    value_tokens = value_part.strip().split()
+                    if not value_tokens:
+                        continue
+                    # Values are in kB in /proc/meminfo.
+                    meminfo[key] = float(value_tokens[0]) * 1024.0
+        except OSError:
+            meminfo = {}
+
+        total = float(meminfo.get("MemTotal", total) or total)
+        free = float(meminfo.get("MemFree", free) or free)
+        buffers = float(meminfo.get("Buffers", buffers) or buffers)
+        cached = float(meminfo.get("Cached", cached) or cached)
+
     used_actual = max(0.0, total - free - buffers - cached)
+
+    # Fallback for environments with incomplete fields.
+    if total > 0 and used_actual <= 0.0:
+        used_actual = max(0.0, total - float(getattr(vm, "available", 0) or 0))
+
     percent_actual = (used_actual / total * 100.0) if total > 0 else 0.0
     return used_actual, total, percent_actual, vm
 
@@ -298,14 +334,14 @@ def draw(stdscr, refresh_rate: float, proc_count: int):
             stdscr,
             5,
             0,
-            f"Memory   : {mem_percent_actual:5.1f}%  {human_bytes(mem_used_actual)}/{human_bytes(mem_total_actual)}  [{progress_bar(mem_percent_actual, bar_w)}]",
+            f"Memory   : {mem_percent_actual:5.1f}%  {human_bytes(mem_used_actual, 2)}/{human_bytes(mem_total_actual, 2)}  [{progress_bar(mem_percent_actual, bar_w)}]",
             width,
         )
         safe_addnstr(
             stdscr,
             6,
             0,
-            f"Swap     : {sm.percent:5.1f}%  {human_bytes(sm.used)}/{human_bytes(sm.total)}  [{progress_bar(sm.percent, bar_w)}]",
+            f"Swap     : {sm.percent:5.1f}%  {human_bytes(sm.used, 2)}/{human_bytes(sm.total, 2)}  [{progress_bar(sm.percent, bar_w)}]",
             width,
         )
         safe_addnstr(

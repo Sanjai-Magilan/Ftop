@@ -33,3 +33,18 @@ All notable changes in this project from the beginning.
 
 - Commit: `5be3e30`
 - Updated documentation for power sorting and per-process power estimation behavior.
+
+## 2026-04-26 13:43:04 +0530
+
+- Commit: `840d4d6`
+- Updated documentation and process display behavior for power sorting and full process listing.
+
+## 2026-04-26 14:36:04 +0530
+
+- Commit: `8d65835`
+- Improved metric sampling (CPU, memory, network) and monitoring accuracy behavior.
+
+## 2026-04-26 14:39:15 +0530
+
+- Commit: `9b986f5`
+- Removed color handling logic from the monitoring display.
