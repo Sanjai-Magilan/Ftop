@@ -45,6 +45,10 @@ def get_top_processes(limit: int, sort_key: str):
 
     if sort_key == "mem":
         procs.sort(key=lambda p: p.get("memory_percent") or 0.0, reverse=True)
+    elif sort_key == "power":
+        # Per-process power draw is not directly exposed by psutil on most systems.
+        # Use CPU% as a practical proxy for "power" sorting.
+        procs.sort(key=lambda p: p.get("cpu_percent") or 0.0, reverse=True)
     else:
         procs.sort(key=lambda p: p.get("cpu_percent") or 0.0, reverse=True)
 
@@ -175,7 +179,7 @@ def draw(stdscr, refresh_rate: float, proc_count: int):
             stdscr,
             12,
             0,
-            f"Processes: {proc_total} total | Top {len(procs)} by {'CPU' if sort_key == 'cpu' else 'MEM'}",
+            f"Processes: {proc_total} total | Top {len(procs)} by {'CPU' if sort_key == 'cpu' else 'MEM' if sort_key == 'mem' else 'PWR*'}",
             width,
             curses.A_BOLD,
         )
@@ -194,7 +198,7 @@ def draw(stdscr, refresh_rate: float, proc_count: int):
             safe_addnstr(stdscr, row, 0, line, width)
             row += 1
 
-        help_line = "q:quit  c:sort CPU  m:sort MEM  r:refresh"
+        help_line = "q:quit  c:sort CPU  m:sort MEM  p:sort PWR*  r:refresh"
         safe_addnstr(stdscr, height - 1, 0, help_line.ljust(width), width, curses.A_REVERSE)
 
         stdscr.refresh()
@@ -206,6 +210,8 @@ def draw(stdscr, refresh_rate: float, proc_count: int):
             sort_key = "cpu"
         elif key in (ord("m"), ord("M")):
             sort_key = "mem"
+        elif key in (ord("p"), ord("P")):
+            sort_key = "power"
         elif key in (ord("r"), ord("R")):
             pass
 
