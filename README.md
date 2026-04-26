@@ -48,6 +48,11 @@ python3 monitor.py --refresh 0.5 --top 20
 - `p` → Sort process list by power consumption
 - `r` → Refresh immediately
 
+### Power column note
+
+- `PWR` / `PWR*` is an estimated per-process power value (derived from CPU usage).
+- If the estimated value is too low or cannot be calculated, the table shows `-`.
+
 ## Troubleshooting
 
 ### `_curses.error: addnwstr() returned ERR`

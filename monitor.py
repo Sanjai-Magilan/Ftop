@@ -4,8 +4,13 @@ import os
 import socket
 import time
 from datetime import datetime
+from typing import Optional
 
 import psutil
+
+
+ASSUMED_CPU_PACKAGE_POWER_W = 65.0
+MIN_DISPLAY_POWER_W = 0.1
 
 
 def human_bytes(value: float) -> str:
@@ -34,11 +39,37 @@ def progress_bar(percent: float, width: int) -> str:
     return "█" * fill + "░" * (width - fill)
 
 
-def get_top_processes(limit: int, sort_key: str):
+def estimate_process_power_watts(cpu_percent: float, logical_cpus: int) -> Optional[float]:
+    """Estimate process power in watts from CPU usage.
+
+    This is an approximation based on an assumed total CPU package power.
+    """
+    if logical_cpus <= 0:
+        return None
+
+    cpu_percent = cpu_percent or 0.0
+    if cpu_percent <= 0.0:
+        return None
+
+    usage_fraction = cpu_percent / (100.0 * logical_cpus)
+    watts = max(0.0, usage_fraction * ASSUMED_CPU_PACKAGE_POWER_W)
+    if watts < MIN_DISPLAY_POWER_W:
+        return None
+    return watts
+
+
+def format_power_usage(watts: Optional[float]) -> str:
+    if watts is None:
+        return "-"
+    return f"{watts:.1f}W"
+
+
+def get_top_processes(limit: int, sort_key: str, logical_cpus: int):
     procs = []
     for proc in psutil.process_iter(["pid", "name", "username", "cpu_percent", "memory_percent"]):
         try:
             info = proc.info
+            info["power_watts"] = estimate_process_power_watts(info.get("cpu_percent") or 0.0, logical_cpus)
             procs.append(info)
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
@@ -46,9 +77,7 @@ def get_top_processes(limit: int, sort_key: str):
     if sort_key == "mem":
         procs.sort(key=lambda p: p.get("memory_percent") or 0.0, reverse=True)
     elif sort_key == "power":
-        # Per-process power draw is not directly exposed by psutil on most systems.
-        # Use CPU% as a practical proxy for "power" sorting.
-        procs.sort(key=lambda p: p.get("cpu_percent") or 0.0, reverse=True)
+        procs.sort(key=lambda p: p.get("power_watts") or 0.0, reverse=True)
     else:
         procs.sort(key=lambda p: p.get("cpu_percent") or 0.0, reverse=True)
 
@@ -91,6 +120,7 @@ def draw(stdscr, refresh_rate: float, proc_count: int):
     sort_key = "cpu"
     net_prev = psutil.net_io_counters()
     net_prev_time = time.time()
+    logical_cpus = psutil.cpu_count(logical=True) or 1
 
     while True:
         height, width = stdscr.getmaxyx()
@@ -125,7 +155,7 @@ def draw(stdscr, refresh_rate: float, proc_count: int):
         net_prev = net_now
         net_prev_time = now_t
 
-        procs = get_top_processes(proc_count, sort_key)
+        procs = get_top_processes(proc_count, sort_key, logical_cpus)
         proc_total = len(psutil.pids())
 
         bar_w = max(10, min(40, width - 38))
@@ -183,7 +213,7 @@ def draw(stdscr, refresh_rate: float, proc_count: int):
             width,
             curses.A_BOLD,
         )
-        safe_addnstr(stdscr, 13, 0, "PID      USER            CPU%   MEM%   NAME", width, curses.A_UNDERLINE)
+        safe_addnstr(stdscr, 13, 0, "PID      USER            CPU%   MEM%     PWR   NAME", width, curses.A_UNDERLINE)
 
         row = 14
         for p in procs:
@@ -193,8 +223,9 @@ def draw(stdscr, refresh_rate: float, proc_count: int):
             user = (p.get("username") or "-")[:14]
             cpu = p.get("cpu_percent") or 0.0
             mem = p.get("memory_percent") or 0.0
-            name = (p.get("name") or "-")[: max(1, width - 37)]
-            line = f"{pid:<8} {user:<14} {cpu:>5.1f}  {mem:>5.1f}  {name}"
+            power = format_power_usage(p.get("power_watts"))
+            name = (p.get("name") or "-")[: max(1, width - 46)]
+            line = f"{pid:<8} {user:<14} {cpu:>5.1f}  {mem:>5.1f}  {power:>6}  {name}"
             safe_addnstr(stdscr, row, 0, line, width)
             row += 1
 
