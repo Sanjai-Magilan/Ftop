@@ -24,12 +24,12 @@ All notable changes in this project from the beginning.
 - Commit: `11d0a12`
 - Added power sorting option for top processes in the monitoring display (`p` key).
 
-## 2026-04-26 13:07:20 +0530
-
-- Commit: `9f75769`
-- Added changelog to document notable project changes.
-
 ## 2026-04-26 13:08:14 +0530
 
 - Commit: `2cbfd73`
 - Updated README to include power sorting option for top processes.
+
+## 2026-04-26 13:16:41 +0530
+
+- Commit: `5be3e30`
+- Updated documentation for power sorting and per-process power estimation behavior.
