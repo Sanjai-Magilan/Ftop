@@ -53,3 +53,9 @@ All notable changes in this project from the beginning.
 
 - Commit: `d0f653e`
 - Improved memory usage sampling accuracy in the monitor.
+
+## 2026-04-26 17:23:48 +0530
+
+- Commit: `fabf7bf`
+- Added process tree termination for kill action.
+- Added process search/filter by name or PID.

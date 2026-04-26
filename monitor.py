@@ -335,7 +335,7 @@ def draw(stdscr, refresh_rate: float, proc_count: int):
 
     while True:
         height, width = stdscr.getmaxyx()
-        visible_rows = max(1, height - 15)
+        visible_rows = max(1, height - 16)
         key = stdscr.getch()
 
         if key in (ord("q"), ord("Q")):
@@ -518,15 +518,6 @@ def draw(stdscr, refresh_rate: float, proc_count: int):
         core_line = " ".join(f"C{i}:{v:4.0f}%" for i, v in enumerate(cpu_per_core))
         safe_addnstr(stdscr, 10, 0, f"Cores    : {core_line}", width)
 
-        if search_mode:
-            safe_addnstr(stdscr, 11, 0, f"Search   : /{search_input}", width)
-        elif search_query:
-            safe_addnstr(stdscr, 11, 0, f"Filter   : /{search_query}  (press '/' to edit, Enter on empty to clear)", width)
-        elif status_message and time.time() < status_until:
-            safe_addnstr(stdscr, 11, 0, f"Status   : {status_message}", width)
-        else:
-            status_message = ""
-
         safe_addnstr(
             stdscr,
             12,
@@ -555,7 +546,7 @@ def draw(stdscr, refresh_rate: float, proc_count: int):
 
         row = 14
         for idx, p in enumerate(visible_procs):
-            if row >= height - 1:
+            if row >= height - 2:
                 break
             absolute_index = scroll_offset + idx
             pid = p.get("pid", 0)
@@ -568,6 +559,18 @@ def draw(stdscr, refresh_rate: float, proc_count: int):
             row_attr = curses.A_REVERSE if absolute_index == selected_index else 0
             safe_addnstr(stdscr, row, 0, line, width, row_attr)
             row += 1
+
+        bottom_line = ""
+        if search_mode:
+            bottom_line = f"Search   : {search_input}"
+        elif search_query:
+            bottom_line = f"Filter   : {search_query}  (press '/' to edit, Enter on empty to clear)"
+        elif status_message and time.time() < status_until:
+            bottom_line = f"Status   : {status_message}"
+        else:
+            status_message = ""
+
+        safe_addnstr(stdscr, height - 2, 0, bottom_line.ljust(width), width)
 
         help_line = "q:quit  /:search  Enter:lock/unlock  ↑/↓ or j/k:move  PgUp/PgDn:page  Home/End  K:kill  c/m/p:sort  r:refresh"
         if max_scroll > 0:
