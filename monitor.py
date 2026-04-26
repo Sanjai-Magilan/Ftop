@@ -67,6 +67,69 @@ def format_power_usage(watts: Optional[float]) -> str:
     return f"{watts:.1f}W"
 
 
+def kill_process_tree(pid: int) -> Tuple[bool, str]:
+    """Kill a process and its children. Returns (success, message)."""
+    if pid <= 0:
+        return False, "Invalid process id"
+
+    try:
+        parent = psutil.Process(pid)
+    except psutil.NoSuchProcess:
+        return True, f"PID {pid} no longer exists"
+    except psutil.AccessDenied:
+        return False, f"Permission denied for PID {pid}"
+    except psutil.Error:
+        return False, f"Failed to access PID {pid}"
+
+    killed = 0
+    denied = 0
+    targets: List[psutil.Process] = []
+
+    try:
+        children = parent.children(recursive=True)
+    except (psutil.NoSuchProcess, psutil.ZombieProcess):
+        children = []
+    except psutil.AccessDenied:
+        children = []
+
+    # Kill deepest children first.
+    for proc in reversed(children):
+        try:
+            proc.kill()
+            targets.append(proc)
+            killed += 1
+        except (psutil.NoSuchProcess, psutil.ZombieProcess):
+            continue
+        except psutil.AccessDenied:
+            denied += 1
+
+    try:
+        parent.kill()
+        targets.append(parent)
+        killed += 1
+    except (psutil.NoSuchProcess, psutil.ZombieProcess):
+        pass
+    except psutil.AccessDenied:
+        denied += 1
+
+    if targets:
+        try:
+            _, alive = psutil.wait_procs(targets, timeout=0.8)
+        except psutil.Error:
+            alive = []
+        if alive:
+            return False, f"Kill incomplete for PID {pid} ({len(alive)} still alive)"
+
+    if killed == 0:
+        if denied > 0:
+            return False, f"Permission denied for PID {pid}"
+        return True, f"PID {pid} no longer exists"
+
+    if denied > 0:
+        return False, f"Killed {killed} proc(s), denied {denied} for PID {pid}"
+    return True, f"Killed PID {pid} (and {max(0, killed - 1)} child proc(s))"
+
+
 def prime_measurements() -> None:
     """Prime non-blocking CPU counters to avoid first-sample zeros."""
     psutil.cpu_percent(interval=None, percpu=True)
@@ -191,6 +254,21 @@ def get_top_processes(limit: int, sort_key: str, logical_cpus: int):
     return procs[:limit], total_count
 
 
+def filter_processes(procs: List[dict], query: str) -> List[dict]:
+    """Filter processes by name or PID substring."""
+    q = (query or "").strip().lower()
+    if not q:
+        return procs
+
+    filtered = []
+    for p in procs:
+        pid_text = str(p.get("pid", ""))
+        name_text = (p.get("name") or "").lower()
+        if q in pid_text or q in name_text:
+            filtered.append(p)
+    return filtered
+
+
 def safe_addnstr(stdscr, y: int, x: int, text: str, width: int, attr: int = 0) -> None:
     """Safely draw text without throwing on small terminal sizes."""
     height, screen_w = stdscr.getmaxyx()
@@ -223,6 +301,13 @@ def draw(stdscr, refresh_rate: float, proc_count: int):
 
     sort_key = "cpu"
     scroll_offset = 0
+    selected_index = 0
+    locked_pid = None
+    search_mode = False
+    search_query = ""
+    search_input = ""
+    status_message = ""
+    status_until = 0.0
     net_prev = psutil.net_io_counters()
     net_prev_time = time.time()
     logical_cpus = psutil.cpu_count(logical=True) or 1
@@ -246,14 +331,35 @@ def draw(stdscr, refresh_rate: float, proc_count: int):
     net_now = net_prev
     proc_total = 0
     procs = []
+    sampled_procs = []
 
     while True:
         height, width = stdscr.getmaxyx()
+        visible_rows = max(1, height - 15)
         key = stdscr.getch()
 
         if key in (ord("q"), ord("Q")):
             break
-        if key in (ord("c"), ord("C")):
+        if search_mode:
+            if key in (27,):  # ESC
+                search_mode = False
+                search_input = ""
+            elif key in (curses.KEY_ENTER, 10, 13):
+                search_query = search_input.strip()
+                search_mode = False
+                search_input = ""
+                selected_index = 0
+                scroll_offset = 0
+            elif key in (curses.KEY_BACKSPACE, 127, 8):
+                search_input = search_input[:-1]
+            elif key == 21:  # Ctrl+U
+                search_input = ""
+            elif 32 <= key <= 126:
+                search_input += chr(key)
+        elif key == ord("/"):
+            search_mode = True
+            search_input = search_query
+        elif key in (ord("c"), ord("C")):
             sort_key = "cpu"
             scroll_offset = 0
             force_refresh = True
@@ -267,18 +373,53 @@ def draw(stdscr, refresh_rate: float, proc_count: int):
             force_refresh = True
         elif key in (ord("r"), ord("R")):
             force_refresh = True
-        elif key in (curses.KEY_DOWN, ord("j"), ord("J")):
-            scroll_offset += 1
-        elif key in (curses.KEY_UP, ord("k"), ord("K")):
-            scroll_offset -= 1
-        elif key == curses.KEY_NPAGE:  # Page Down
-            scroll_offset += max(1, height - 16)
-        elif key == curses.KEY_PPAGE:  # Page Up
-            scroll_offset -= max(1, height - 16)
-        elif key == curses.KEY_HOME:
-            scroll_offset = 0
-        elif key == curses.KEY_END:
-            scroll_offset = 10**9
+        elif key in (curses.KEY_ENTER, 10, 13):
+            if not procs:
+                status_message = "No process to lock"
+                status_until = time.time() + 2.0
+            else:
+                selected_index = max(0, min(selected_index, len(procs) - 1))
+                sel_pid = procs[selected_index].get("pid")
+                if locked_pid == sel_pid:
+                    locked_pid = None
+                    status_message = "Selection unlocked"
+                    status_until = time.time() + 2.0
+                else:
+                    locked_pid = sel_pid
+                    status_message = f"Locked on PID {locked_pid}"
+                    status_until = time.time() + 2.0
+        elif locked_pid is None and key in (curses.KEY_DOWN, ord("j"), ord("J")):
+            selected_index += 1
+        elif locked_pid is None and key in (curses.KEY_UP, ord("k")):
+            selected_index -= 1
+        elif locked_pid is None and key == curses.KEY_NPAGE:  # Page Down
+            selected_index += visible_rows
+        elif locked_pid is None and key == curses.KEY_PPAGE:  # Page Up
+            selected_index -= visible_rows
+        elif locked_pid is None and key == curses.KEY_HOME:
+            selected_index = 0
+        elif locked_pid is None and key == curses.KEY_END:
+            selected_index = 10**9
+        elif key in (ord("K"),):
+            if not procs:
+                status_message = "No process selected"
+                status_until = time.time() + 2.0
+            else:
+                selected_index = max(0, min(selected_index, len(procs) - 1))
+                pid = procs[selected_index].get("pid", 0)
+                try:
+                    pid_int = int(pid)
+                except (TypeError, ValueError):
+                    pid_int = 0
+
+                if pid_int <= 0:
+                    status_message = "Invalid process id"
+                    status_until = time.time() + 2.0
+                else:
+                    ok, msg = kill_process_tree(pid_int)
+                    status_message = msg
+                    status_until = time.time() + (2.0 if ok else 2.8)
+                    force_refresh = True
 
         now_t = time.time()
         metrics_interval = max(0.2, refresh_rate)
@@ -299,7 +440,19 @@ def draw(stdscr, refresh_rate: float, proc_count: int):
             net_prev = net_now
 
             current_limit = 0 if proc_count == 0 else proc_count
-            procs, proc_total = get_top_processes(current_limit, sort_key, logical_cpus)
+            sampled_procs, proc_total = get_top_processes(current_limit, sort_key, logical_cpus)
+            procs = filter_processes(sampled_procs, search_query)
+
+            if locked_pid is not None:
+                exists_any = any(p.get("pid") == locked_pid for p in sampled_procs)
+                if not exists_any:
+                    status_message = f"Locked PID {locked_pid} exited"
+                    status_until = time.time() + 2.0
+                    locked_pid = None
+                else:
+                    locked_index = next((i for i, p in enumerate(procs) if p.get("pid") == locked_pid), -1)
+                    if locked_index >= 0:
+                        selected_index = locked_index
 
             last_sample_time = now_t
             force_refresh = False
@@ -365,25 +518,46 @@ def draw(stdscr, refresh_rate: float, proc_count: int):
         core_line = " ".join(f"C{i}:{v:4.0f}%" for i, v in enumerate(cpu_per_core))
         safe_addnstr(stdscr, 10, 0, f"Cores    : {core_line}", width)
 
+        if search_mode:
+            safe_addnstr(stdscr, 11, 0, f"Search   : /{search_input}", width)
+        elif search_query:
+            safe_addnstr(stdscr, 11, 0, f"Filter   : /{search_query}  (press '/' to edit, Enter on empty to clear)", width)
+        elif status_message and time.time() < status_until:
+            safe_addnstr(stdscr, 11, 0, f"Status   : {status_message}", width)
+        else:
+            status_message = ""
+
         safe_addnstr(
             stdscr,
             12,
             0,
-            f"Processes: {proc_total} total | Showing {len(procs)} by {'CPU' if sort_key == 'cpu' else 'MEM' if sort_key == 'mem' else 'PWR*'}",
+            f"Processes: {proc_total} total | Showing {len(procs)} by {'CPU' if sort_key == 'cpu' else 'MEM' if sort_key == 'mem' else 'PWR*'}"
+            f"{' | /' + search_query if search_query else ''}"
+            f"{' | LOCK PID ' + str(locked_pid) if locked_pid is not None else ''}",
             width,
             curses.A_BOLD,
         )
         safe_addnstr(stdscr, 13, 0, "PID      USER            CPU%   MEM%     PWR   NAME", width, curses.A_UNDERLINE)
 
-        visible_rows = max(1, height - 15)
+        if procs:
+            selected_index = max(0, min(selected_index, len(procs) - 1))
+        else:
+            selected_index = 0
+
+        if selected_index < scroll_offset:
+            scroll_offset = selected_index
+        elif selected_index >= scroll_offset + visible_rows:
+            scroll_offset = selected_index - visible_rows + 1
+
         max_scroll = max(0, len(procs) - visible_rows)
         scroll_offset = max(0, min(scroll_offset, max_scroll))
         visible_procs = procs[scroll_offset : scroll_offset + visible_rows]
 
         row = 14
-        for p in visible_procs:
+        for idx, p in enumerate(visible_procs):
             if row >= height - 1:
                 break
+            absolute_index = scroll_offset + idx
             pid = p.get("pid", 0)
             user = (p.get("username") or "-")[:14]
             cpu = p.get("cpu_percent") or 0.0
@@ -391,10 +565,11 @@ def draw(stdscr, refresh_rate: float, proc_count: int):
             power = format_power_usage(p.get("power_watts"))
             name = (p.get("name") or "-")[: max(1, width - 46)]
             line = f"{pid:<8} {user:<14} {cpu:>5.1f}  {mem:>5.1f}  {power:>6}  {name}"
-            safe_addnstr(stdscr, row, 0, line, width)
+            row_attr = curses.A_REVERSE if absolute_index == selected_index else 0
+            safe_addnstr(stdscr, row, 0, line, width, row_attr)
             row += 1
 
-        help_line = "q:quit  ↑/↓ or j/k:scroll  PgUp/PgDn:page  c/m/p:sort  r:refresh"
+        help_line = "q:quit  /:search  Enter:lock/unlock  ↑/↓ or j/k:move  PgUp/PgDn:page  Home/End  K:kill  c/m/p:sort  r:refresh"
         if max_scroll > 0:
             pos = min(len(procs), scroll_offset + 1)
             end = min(len(procs), scroll_offset + len(visible_procs))
