@@ -9,7 +9,7 @@ It shows live:
 - Uptime
 - Memory, swap, and disk usage
 - Network up/down rate
-- Top processes (sorted by CPU or memory)
+- Top processes (sorted by CPU, memory, or power)
 
 ## Requirements
 
@@ -45,6 +45,7 @@ python3 monitor.py --refresh 0.5 --top 20
 - `q` → Quit
 - `c` → Sort process list by CPU
 - `m` → Sort process list by memory
+- `p` → Sort process list by power consumption
 - `r` → Refresh immediately
 
 ## Troubleshooting
