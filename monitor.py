@@ -4,7 +4,7 @@ import os
 import socket
 import time
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Dict, List, Optional, Tuple
 
 import psutil
 
@@ -13,6 +13,7 @@ ASSUMED_CPU_PACKAGE_POWER_W = 65.0
 MIN_DISPLAY_POWER_W = 0.1
 NET_EMA_ALPHA = 0.35
 MIN_NET_DT = 0.25
+UI_POLL_MS = 50
 
 
 def human_bytes(value: float, decimals: int = 1) -> str:
@@ -76,7 +77,7 @@ def prime_measurements() -> None:
             continue
 
 
-def sample_cpu_usage():
+def sample_cpu_usage() -> Tuple[float, List[float]]:
     """Return total CPU% and per-core CPU% using one consistent sample."""
     per_core = psutil.cpu_percent(interval=None, percpu=True)
     if not per_core:
@@ -159,6 +160,7 @@ def sample_network_rates(net_prev, net_prev_time: float, ema_down: float, ema_up
 
 
 def get_top_processes(limit: int, sort_key: str, logical_cpus: int):
+    """Sample and return process rows plus total visible process count."""
     procs = []
     for proc in psutil.process_iter(["pid", "name", "username", "memory_percent", "status"]):
         try:
@@ -183,9 +185,10 @@ def get_top_processes(limit: int, sort_key: str, logical_cpus: int):
     else:
         procs.sort(key=lambda p: p.get("cpu_percent") or 0.0, reverse=True)
 
+    total_count = len(procs)
     if limit <= 0:
-        return procs
-    return procs[:limit]
+        return procs, total_count
+    return procs[:limit], total_count
 
 
 def safe_addnstr(stdscr, y: int, x: int, text: str, width: int, attr: int = 0) -> None:
@@ -212,8 +215,8 @@ def draw(stdscr, refresh_rate: float, proc_count: int):
         pass
 
     stdscr.nodelay(True)
-    # Poll keys frequently; refresh expensive metrics on refresh_rate cadence.
-    stdscr.timeout(50)
+    # Fast UI polling; metric sampling runs on its own cadence.
+    stdscr.timeout(UI_POLL_MS)
 
     # Prime CPU counters so initial readings are meaningful.
     prime_measurements()
@@ -295,9 +298,8 @@ def draw(stdscr, refresh_rate: float, proc_count: int):
             )
             net_prev = net_now
 
-            proc_total = len(psutil.pids())
-            current_limit = proc_total if proc_count == 0 else proc_count
-            procs = get_top_processes(current_limit, sort_key, logical_cpus)
+            current_limit = 0 if proc_count == 0 else proc_count
+            procs, proc_total = get_top_processes(current_limit, sort_key, logical_cpus)
 
             last_sample_time = now_t
             force_refresh = False

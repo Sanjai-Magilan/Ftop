@@ -48,3 +48,8 @@ All notable changes in this project from the beginning.
 
 - Commit: `9b986f5`
 - Removed color handling logic from the monitoring display.
+
+## 2026-04-26 15:19:16 +0530
+
+- Commit: `d0f653e`
+- Improved memory usage sampling accuracy in the monitor.
