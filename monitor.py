@@ -12,6 +12,12 @@ import psutil
 ASSUMED_CPU_PACKAGE_POWER_W = 65.0
 MIN_DISPLAY_POWER_W = 0.1
 
+COLOR_PAIR_LOW = 1
+COLOR_PAIR_MED = 2
+COLOR_PAIR_HIGH = 3
+NET_EMA_ALPHA = 0.35
+MIN_NET_DT = 0.25
+
 
 def human_bytes(value: float) -> str:
     units = ["B", "KB", "MB", "GB", "TB", "PB"]
@@ -64,14 +70,105 @@ def format_power_usage(watts: Optional[float]) -> str:
     return f"{watts:.1f}W"
 
 
+def prime_measurements() -> None:
+    """Prime non-blocking CPU counters to avoid first-sample zeros."""
+    psutil.cpu_percent(interval=None, percpu=True)
+    for proc in psutil.process_iter(["pid"]):
+        try:
+            proc.cpu_percent(interval=None)
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+
+
+def sample_cpu_usage():
+    """Return total CPU% and per-core CPU% using one consistent sample."""
+    per_core = psutil.cpu_percent(interval=None, percpu=True)
+    if not per_core:
+        return 0.0, []
+    total = sum(per_core) / len(per_core)
+    return total, per_core
+
+
+def sample_memory_usage():
+    """Return Linux-like actual memory usage: used=total-free-buffers-cached."""
+    vm = psutil.virtual_memory()
+    total = float(vm.total or 0)
+    free = float(getattr(vm, "free", 0) or 0)
+    buffers = float(getattr(vm, "buffers", 0) or 0)
+    cached = float(getattr(vm, "cached", 0) or 0)
+
+    used_actual = max(0.0, total - free - buffers - cached)
+    percent_actual = (used_actual / total * 100.0) if total > 0 else 0.0
+    return used_actual, total, percent_actual, vm
+
+
+def sample_network_rates(net_prev, net_prev_time: float, ema_down: float, ema_up: float):
+    """Return current net counters and smoothed upload/download rates."""
+    net_now = psutil.net_io_counters()
+    now_t = time.time()
+    dt = now_t - net_prev_time
+    if dt < MIN_NET_DT:
+        dt = MIN_NET_DT
+
+    down_rate = max(0.0, (net_now.bytes_recv - net_prev.bytes_recv) / dt)
+    up_rate = max(0.0, (net_now.bytes_sent - net_prev.bytes_sent) / dt)
+
+    if ema_down <= 0.0:
+        ema_down = down_rate
+    else:
+        ema_down = NET_EMA_ALPHA * down_rate + (1.0 - NET_EMA_ALPHA) * ema_down
+
+    if ema_up <= 0.0:
+        ema_up = up_rate
+    else:
+        ema_up = NET_EMA_ALPHA * up_rate + (1.0 - NET_EMA_ALPHA) * ema_up
+
+    return net_now, now_t, ema_down, ema_up
+
+
+def init_colors() -> bool:
+    """Initialize curses color pairs. Returns True if colors are available."""
+    try:
+        if not curses.has_colors():
+            return False
+        curses.start_color()
+        curses.use_default_colors()
+        curses.init_pair(COLOR_PAIR_LOW, curses.COLOR_GREEN, -1)
+        curses.init_pair(COLOR_PAIR_MED, curses.COLOR_YELLOW, -1)
+        curses.init_pair(COLOR_PAIR_HIGH, curses.COLOR_RED, -1)
+        return True
+    except curses.error:
+        return False
+
+
+def get_color(percent: float, colors_enabled: bool) -> int:
+    """Return color attribute for a usage percentage threshold."""
+    if not colors_enabled:
+        return 0
+
+    if percent < 50.0:
+        return curses.color_pair(COLOR_PAIR_LOW)
+    if percent <= 80.0:
+        return curses.color_pair(COLOR_PAIR_MED)
+    return curses.color_pair(COLOR_PAIR_HIGH)
+
+
 def get_top_processes(limit: int, sort_key: str, logical_cpus: int):
     procs = []
-    for proc in psutil.process_iter(["pid", "name", "username", "cpu_percent", "memory_percent"]):
+    for proc in psutil.process_iter(["pid", "name", "username", "memory_percent", "status"]):
         try:
             info = proc.info
-            info["power_watts"] = estimate_process_power_watts(info.get("cpu_percent") or 0.0, logical_cpus)
+            if info.get("status") == psutil.STATUS_ZOMBIE:
+                continue
+
+            cpu_percent = proc.cpu_percent(interval=None)
+            mem_percent = info.get("memory_percent") or 0.0
+
+            info["cpu_percent"] = cpu_percent
+            info["memory_percent"] = mem_percent
+            info["power_watts"] = estimate_process_power_watts(cpu_percent, logical_cpus)
             procs.append(info)
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             continue
 
     if sort_key == "mem":
@@ -108,17 +205,15 @@ def draw(stdscr, refresh_rate: float, proc_count: int):
         curses.curs_set(0)
     except curses.error:
         pass
+
+    colors_enabled = init_colors()
+
     stdscr.nodelay(True)
     # Poll keys frequently; refresh expensive metrics on refresh_rate cadence.
     stdscr.timeout(50)
 
-    # Prime CPU counters so process CPU% values become meaningful on next updates.
-    psutil.cpu_percent(interval=None)
-    for proc in psutil.process_iter():
-        try:
-            proc.cpu_percent(interval=None)
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            continue
+    # Prime CPU counters so initial readings are meaningful.
+    prime_measurements()
 
     sort_key = "cpu"
     scroll_offset = 0
@@ -134,11 +229,14 @@ def draw(stdscr, refresh_rate: float, proc_count: int):
     cpu_per_core = [0.0] * logical_cpus
     load_avg = (0.0, 0.0, 0.0)
     vm = psutil.virtual_memory()
+    mem_used_actual = 0.0
+    mem_total_actual = float(vm.total or 0)
+    mem_percent_actual = 0.0
     sm = psutil.swap_memory()
     disk = psutil.disk_usage("/")
     uptime = "00:00:00"
-    down_rate = 0.0
-    up_rate = 0.0
+    down_rate_ema = 0.0
+    up_rate_ema = 0.0
     net_now = net_prev
     proc_total = 0
     procs = []
@@ -177,24 +275,22 @@ def draw(stdscr, refresh_rate: float, proc_count: int):
             scroll_offset = 10**9
 
         now_t = time.time()
-        if force_refresh or (now_t - last_sample_time) >= refresh_rate:
+        metrics_interval = max(0.2, refresh_rate)
+        if force_refresh or (now_t - last_sample_time) >= metrics_interval:
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            cpu_total = psutil.cpu_percent(interval=None)
-            cpu_per_core = psutil.cpu_percent(interval=None, percpu=True)
+            cpu_total, cpu_per_core = sample_cpu_usage()
             load_avg = os.getloadavg() if hasattr(os, "getloadavg") else (0.0, 0.0, 0.0)
 
-            vm = psutil.virtual_memory()
+            mem_used_actual, mem_total_actual, mem_percent_actual, vm = sample_memory_usage()
             sm = psutil.swap_memory()
             disk = psutil.disk_usage("/")
             boot_time = psutil.boot_time()
             uptime = human_uptime(time.time() - boot_time)
 
-            net_now = psutil.net_io_counters()
-            dt = max(0.001, now_t - net_prev_time)
-            down_rate = (net_now.bytes_recv - net_prev.bytes_recv) / dt
-            up_rate = (net_now.bytes_sent - net_prev.bytes_sent) / dt
+            net_now, net_prev_time, down_rate_ema, up_rate_ema = sample_network_rates(
+                net_prev, net_prev_time, down_rate_ema, up_rate_ema
+            )
             net_prev = net_now
-            net_prev_time = now_t
 
             proc_total = len(psutil.pids())
             current_limit = proc_total if proc_count == 0 else proc_count
@@ -216,7 +312,14 @@ def draw(stdscr, refresh_rate: float, proc_count: int):
         title = f" SysWatcher • {host} • {now} "
         safe_addnstr(stdscr, 0, 0, title.ljust(width), width, curses.A_REVERSE)
 
-        safe_addnstr(stdscr, 2, 0, f"CPU Total: {cpu_total:5.1f}%  [{progress_bar(cpu_total, bar_w)}]", width)
+        safe_addnstr(
+            stdscr,
+            2,
+            0,
+            f"CPU Total: {cpu_total:5.1f}%  [{progress_bar(cpu_total, bar_w)}]",
+            width,
+            get_color(cpu_total, colors_enabled),
+        )
         safe_addnstr(
             stdscr,
             3,
@@ -229,8 +332,9 @@ def draw(stdscr, refresh_rate: float, proc_count: int):
             stdscr,
             5,
             0,
-            f"Memory   : {vm.percent:5.1f}%  {human_bytes(vm.used)}/{human_bytes(vm.total)}  [{progress_bar(vm.percent, bar_w)}]",
+            f"Memory   : {mem_percent_actual:5.1f}%  {human_bytes(mem_used_actual)}/{human_bytes(mem_total_actual)}  [{progress_bar(mem_percent_actual, bar_w)}]",
             width,
+            get_color(mem_percent_actual, colors_enabled),
         )
         safe_addnstr(
             stdscr,
@@ -245,13 +349,14 @@ def draw(stdscr, refresh_rate: float, proc_count: int):
             0,
             f"Disk /   : {disk.percent:5.1f}%  {human_bytes(disk.used)}/{human_bytes(disk.total)}  [{progress_bar(disk.percent, bar_w)}]",
             width,
+            get_color(disk.percent, colors_enabled),
         )
 
         safe_addnstr(
             stdscr,
             9,
             0,
-            f"Network  : ↓ {human_bytes(down_rate)}/s   ↑ {human_bytes(up_rate)}/s   Total ↓ {human_bytes(net_now.bytes_recv)} ↑ {human_bytes(net_now.bytes_sent)}",
+            f"Network  : ↓ {human_bytes(down_rate_ema)}/s   ↑ {human_bytes(up_rate_ema)}/s   Total ↓ {human_bytes(net_now.bytes_recv)} ↑ {human_bytes(net_now.bytes_sent)}",
             width,
         )
 
@@ -284,7 +389,8 @@ def draw(stdscr, refresh_rate: float, proc_count: int):
             power = format_power_usage(p.get("power_watts"))
             name = (p.get("name") or "-")[: max(1, width - 46)]
             line = f"{pid:<8} {user:<14} {cpu:>5.1f}  {mem:>5.1f}  {power:>6}  {name}"
-            safe_addnstr(stdscr, row, 0, line, width)
+            proc_attr = get_color(cpu, colors_enabled) if cpu >= 50.0 else 0
+            safe_addnstr(stdscr, row, 0, line, width, proc_attr)
             row += 1
 
         help_line = "q:quit  ↑/↓ or j/k:scroll  PgUp/PgDn:page  c/m/p:sort  r:refresh"
