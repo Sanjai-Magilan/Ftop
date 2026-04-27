@@ -2,6 +2,13 @@
 
 All notable changes in this project from the beginning.
 
+## 2026-04-26
+
+- Updated terminal UI layout so the search/filter/status bar appears at the bottom (second-last line).
+- Kept shortcuts/help text on the last line.
+- Adjusted process table viewport to reserve space for the bottom search/status bar.
+- Updated README controls and UI behavior documentation.
+
 ## 2026-04-04 21:26:25 +0530
 
 - Commit: `ceacd8d`

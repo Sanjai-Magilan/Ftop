@@ -10,6 +10,7 @@ It shows live:
 - Memory, swap, and disk usage
 - Network up/down rate
 - Process list (sorted by CPU, memory, or power)
+- Bottom search/status bar for process filtering and action feedback
 
 ## Requirements
 
@@ -43,10 +44,22 @@ python3 monitor.py --refresh 0.5 --top 20
 ## Controls
 
 - `q` → Quit
+- `/` → Search/filter processes by name or PID
+- `Enter` → Lock/unlock selection on the highlighted process
+- `↑/↓` or `j/k` → Move selection
+- `PgUp/PgDn` → Page up/down
+- `Home/End` → Jump to top/bottom
+- `K` → Kill selected process tree (process + children)
 - `c` → Sort process list by CPU
 - `m` → Sort process list by memory
 - `p` → Sort process list by power consumption
 - `r` → Refresh immediately
+
+### Search bar behavior
+
+- The search/filter input appears on the second-last line (bottom bar).
+- The last line remains the help/shortcut line.
+- Active filter text and status messages are shown in the same bottom bar.
 
 ### Power column note
 

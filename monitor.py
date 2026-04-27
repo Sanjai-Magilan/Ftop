@@ -293,8 +293,15 @@ def draw(stdscr, refresh_rate: float, proc_count: int):
         pass
 
     stdscr.nodelay(True)
+    stdscr.keypad(True)
     # Fast UI polling; metric sampling runs on its own cadence.
     stdscr.timeout(UI_POLL_MS)
+    try:
+        # Make standalone ESC react quickly (instead of waiting for
+        # function-key escape sequence timeout).
+        curses.set_escdelay(25)
+    except (AttributeError, curses.error):
+        pass
 
     # Prime CPU counters so initial readings are meaningful.
     prime_measurements()
@@ -562,7 +569,8 @@ def draw(stdscr, refresh_rate: float, proc_count: int):
 
         bottom_line = ""
         if search_mode:
-            bottom_line = f"Search   : {search_input}"
+            blink_cursor = "|" if int(time.time() * 2) % 2 == 0 else " "
+            bottom_line = f"Search   : {search_input}{blink_cursor}"
         elif search_query:
             bottom_line = f"Filter   : {search_query}  (press '/' to edit, Enter on empty to clear)"
         elif status_message and time.time() < status_until:
