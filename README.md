@@ -1,6 +1,6 @@
 # SysWatcher
 
-A lightweight, terminal-based system monitor written in Python.
+A lightweight, terminal-based system monitor written in Rust.
 
 It shows live:
 
@@ -14,14 +14,13 @@ It shows live:
 
 ## Requirements
 
-- Python 3.8+
-- `psutil`
-- A terminal that supports `curses` (Linux/macOS terminal)
+- Rust toolchain (stable)
+- Linux terminal with UTF-8 support
 
-## Installation
+## Build
 
 ```bash
-python3 -m pip install psutil
+cargo build --release
 ```
 
 ## Run
@@ -29,13 +28,13 @@ python3 -m pip install psutil
 From the project directory:
 
 ```bash
-python3 monitor.py
+cargo run --release
 ```
 
 ### Optional flags
 
 ```bash
-python3 monitor.py --refresh 0.5 --top 20
+cargo run --release -- --refresh 0.5 --top 20
 ```
 
 - `--refresh`: refresh interval in seconds (minimum 0.2)
@@ -49,7 +48,7 @@ python3 monitor.py --refresh 0.5 --top 20
 - `↑/↓` or `j/k` → Move selection
 - `PgUp/PgDn` → Page up/down
 - `Home/End` → Jump to top/bottom
-- `K` → Kill selected process tree (process + children)
+- `x` → Kill selected process tree (process + children)
 - `c` → Sort process list by CPU
 - `m` → Sort process list by memory
 - `p` → Sort process list by power consumption
@@ -60,6 +59,9 @@ python3 monitor.py --refresh 0.5 --top 20
 - The search/filter input appears on the second-last line (bottom bar).
 - The last line remains the help/shortcut line.
 - Active filter text and status messages are shown in the same bottom bar.
+- Press `/` to enter search mode.
+- Press `Esc` once to cancel search mode.
+- A blinking block cursor is shown while typing in search mode.
 
 ### Power column note
 
@@ -68,19 +70,18 @@ python3 monitor.py --refresh 0.5 --top 20
 
 ## Troubleshooting
 
-### `_curses.error: addnwstr() returned ERR`
+### Terminal too small
 
 - Resize your terminal to a larger size.
-- The app now handles small terminal sizes gracefully and shows a warning.
+- Minimum recommended size: 40x8.
 
-### Module not found: `psutil`
+### Build errors
 
-Install dependency:
-
-```bash
-python3 -m pip install psutil
-```
+- Ensure Rust is installed: `rustc --version` and `cargo --version`.
 
 ## Project Structure
 
-- `monitor.py` — main terminal monitor app
+- `src/main.rs` — main terminal monitor app
+- `Cargo.toml` — Rust dependencies and package metadata
+- `Cargo.lock` — dependency lockfile for reproducible builds
+- `.gitignore` — ignores Rust build output (`target/`) and editor temp files
