@@ -14,6 +14,9 @@ All notable changes in this project from the beginning.
 - Updated search UX to use the terminal's high-visibility cursor style when supported.
 - Updated `.gitignore` for Rust workflow (`target/` and editor temp files).
 - Removed legacy Python source and cache files from the project.
+- Improved memory measurement accuracy by parsing Linux `/proc/meminfo` fields including `SReclaimable`, `Shmem`, and `MemAvailable`.
+- Hardened `/proc/meminfo` and `/proc/net/dev` parsing to prevent one malformed line from breaking all metrics.
+- Fixed disk measurement accuracy by using direct `statvfs` syscall on root filesystem instead of relying on sysinfo crate.
 
 ## 2026-04-26
 

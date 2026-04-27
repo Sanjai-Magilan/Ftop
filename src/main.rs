@@ -9,10 +9,9 @@ use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::io::{self, stdout, Stdout, Write};
-use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use sysinfo::{CpuExt, DiskExt, PidExt, ProcessExt, ProcessStatus, System, SystemExt};
+use sysinfo::{CpuExt, PidExt, ProcessExt, ProcessStatus, System, SystemExt};
 
 const ASSUMED_CPU_PACKAGE_POWER_W: f32 = 65.0;
 const MIN_DISPLAY_POWER_W: f32 = 0.1;
@@ -34,6 +33,16 @@ struct ProcRow {
     mem_percent: f32,
     power_watts: Option<f32>,
     name: String,
+}
+
+struct MemInfo {
+    total: u64,
+    free: u64,
+    buffers: u64,
+    cached: u64,
+    sreclaimable: u64,
+    shmem: u64,
+    available: u64,
 }
 
 struct RuntimeMetrics {
@@ -155,24 +164,39 @@ fn now_text() -> String {
     format!("unix:{}", secs)
 }
 
-fn parse_meminfo() -> Option<(u64, u64, u64, u64)> {
+fn parse_meminfo() -> Option<MemInfo> {
     let content = fs::read_to_string("/proc/meminfo").ok()?;
     let mut total = 0_u64;
     let mut free = 0_u64;
     let mut buffers = 0_u64;
     let mut cached = 0_u64;
+    let mut sreclaimable = 0_u64;
+    let mut shmem = 0_u64;
+    let mut available = 0_u64;
 
     for line in content.lines() {
         let mut parts = line.split(':');
-        let key = parts.next()?.trim();
-        let val_part = parts.next()?.trim();
-        let kb = val_part.split_whitespace().next()?.parse::<u64>().ok()?;
+        let Some(key) = parts.next().map(|v| v.trim()) else {
+            continue;
+        };
+        let Some(val_part) = parts.next().map(|v| v.trim()) else {
+            continue;
+        };
+        let Some(kb_str) = val_part.split_whitespace().next() else {
+            continue;
+        };
+        let Ok(kb) = kb_str.parse::<u64>() else {
+            continue;
+        };
         let bytes = kb.saturating_mul(1024);
         match key {
             "MemTotal" => total = bytes,
             "MemFree" => free = bytes,
             "Buffers" => buffers = bytes,
             "Cached" => cached = bytes,
+            "SReclaimable" => sreclaimable = bytes,
+            "Shmem" => shmem = bytes,
+            "MemAvailable" => available = bytes,
             _ => {}
         }
     }
@@ -180,19 +204,38 @@ fn parse_meminfo() -> Option<(u64, u64, u64, u64)> {
     if total == 0 {
         None
     } else {
-        Some((total, free, buffers, cached))
+        Some(MemInfo {
+            total,
+            free,
+            buffers,
+            cached,
+            sreclaimable,
+            shmem,
+            available,
+        })
     }
 }
 
 fn sample_memory_usage(system: &System) -> (u64, u64, f32) {
-    if let Some((total, free, buffers, cached)) = parse_meminfo() {
-        let used = total.saturating_sub(free.saturating_add(buffers).saturating_add(cached));
-        let pct = if total > 0 {
-            (used as f64 / total as f64 * 100.0) as f32
+    if let Some(mi) = parse_meminfo() {
+        // Linux "actual used" approximation:
+        // used = total - free - buffers - (cached + reclaimable - shmem)
+        let effective_cache = mi.cached.saturating_add(mi.sreclaimable).saturating_sub(mi.shmem);
+        let mut used = mi
+            .total
+            .saturating_sub(mi.free.saturating_add(mi.buffers).saturating_add(effective_cache));
+
+        // Fallback when formula is unstable on some kernels/containers.
+        if mi.available > 0 && (used == 0 || used > mi.total) {
+            used = mi.total.saturating_sub(mi.available);
+        }
+
+        let pct = if mi.total > 0 {
+            (used as f64 / mi.total as f64 * 100.0) as f32
         } else {
             0.0
         };
-        return (used, total, pct);
+        return (used, mi.total, pct);
     }
 
     let total = system.total_memory().saturating_mul(1024);
@@ -217,14 +260,23 @@ fn read_net_totals() -> Option<(u64, u64)> {
         }
 
         let mut parts = line.split(':');
-        let iface = parts.next()?.trim();
-        let stats = parts.next()?.split_whitespace().collect::<Vec<_>>();
+        let Some(iface) = parts.next().map(|v| v.trim()) else {
+            continue;
+        };
+        let Some(stats_part) = parts.next() else {
+            continue;
+        };
+        let stats = stats_part.split_whitespace().collect::<Vec<_>>();
         if iface == "lo" || stats.len() < 16 {
             continue;
         }
 
-        let recv = stats[0].parse::<u64>().ok()?;
-        let sent = stats[8].parse::<u64>().ok()?;
+        let Ok(recv) = stats[0].parse::<u64>() else {
+            continue;
+        };
+        let Ok(sent) = stats[8].parse::<u64>() else {
+            continue;
+        };
         recv_total = recv_total.saturating_add(recv);
         sent_total = sent_total.saturating_add(sent);
     }
@@ -384,6 +436,35 @@ fn draw_line(stdout: &mut Stdout, row: u16, text: &str, width: u16, reverse: boo
     Ok(())
 }
 
+fn sample_disk_usage() -> (u64, u64) {
+    // Try to read /proc/mounts for the root filesystem
+    if let Ok(mounts) = fs::read_to_string("/proc/mounts") {
+        for line in mounts.lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 2 && parts[1] == "/" {
+                // Found root mount, try statfs on it
+                if let Ok(statvfs_result) = unsafe {
+                    let mut stat: libc::statvfs = std::mem::zeroed();
+                    let path = std::ffi::CString::new("/").unwrap();
+                    let rc = libc::statvfs(path.as_ptr(), &mut stat);
+                    if rc == 0 {
+                        Ok(stat)
+                    } else {
+                        Err(io::Error::last_os_error())
+                    }
+                } {
+                    let total = statvfs_result.f_blocks.saturating_mul(statvfs_result.f_frsize as u64);
+                    let available = statvfs_result.f_bavail.saturating_mul(statvfs_result.f_frsize as u64);
+                    let used = total.saturating_sub(available);
+                    return (total, used);
+                }
+            }
+        }
+    }
+
+    (0, 0)
+}
+
 fn build_processes(system: &System, sort_key: SortKey, logical_cpus: usize, top: usize) -> (Vec<ProcRow>, usize) {
     let total_mem_kib = system.total_memory().max(1);
     let mut rows = Vec::new();
@@ -465,18 +546,7 @@ fn sample_metrics(
         0.0
     };
 
-    let (disk_total, disk_used) = if let Some(root_disk) = system
-        .disks()
-        .iter()
-        .find(|d| d.mount_point() == Path::new("/"))
-        .or_else(|| system.disks().iter().next())
-    {
-        let total = root_disk.total_space();
-        let used = total.saturating_sub(root_disk.available_space());
-        (total, used)
-    } else {
-        (0, 0)
-    };
+    let (disk_total, disk_used) = sample_disk_usage();
     let disk_percent = if disk_total > 0 {
         (disk_used as f64 / disk_total as f64 * 100.0) as f32
     } else {
