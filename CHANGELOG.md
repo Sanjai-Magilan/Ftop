@@ -2,6 +2,13 @@
 
 All notable changes in this project from the beginning.
 
+## 2026-04-27
+
+- Fixed search cancel behavior so a single `Esc` press exits search mode reliably (no double-tap required).
+- Improved keyboard handling for escape-sequence timing to make standalone `Esc` more responsive.
+- Added a real terminal cursor in search mode and positioned it at the end of the search input.
+- Updated search UX to use the terminal's high-visibility cursor style when supported.
+
 ## 2026-04-26
 
 - Updated terminal UI layout so the search/filter/status bar appears at the bottom (second-last line).

@@ -569,8 +569,7 @@ def draw(stdscr, refresh_rate: float, proc_count: int):
 
         bottom_line = ""
         if search_mode:
-            blink_cursor = "|" if int(time.time() * 2) % 2 == 0 else " "
-            bottom_line = f"Search   : {search_input}{blink_cursor}"
+            bottom_line = f"Search   : {search_input}"
         elif search_query:
             bottom_line = f"Filter   : {search_query}  (press '/' to edit, Enter on empty to clear)"
         elif status_message and time.time() < status_until:
@@ -587,6 +586,26 @@ def draw(stdscr, refresh_rate: float, proc_count: int):
             scroll_info = f"  [{pos}-{end}/{len(procs)}]"
             help_line = help_line + scroll_info
         safe_addnstr(stdscr, height - 1, 0, help_line.ljust(width), width, curses.A_REVERSE)
+
+        if search_mode:
+            try:
+                curses.curs_set(2)
+            except curses.error:
+                pass
+
+            cursor_x = min(width - 1, len("Search   : ") + len(search_input))
+            cursor_y = height - 2
+            if cursor_x >= 0 and cursor_y >= 0:
+                try:
+                    stdscr.move(cursor_y, cursor_x)
+                except curses.error:
+                    pass
+        else:
+            try:
+                curses.curs_set(0)
+            except curses.error:
+                pass
+
         stdscr.noutrefresh()
         curses.doupdate()
 
