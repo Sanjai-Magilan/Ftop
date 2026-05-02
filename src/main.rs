@@ -18,6 +18,7 @@ const MIN_DISPLAY_POWER_W: f32 = 0.1;
 const NET_EMA_ALPHA: f64 = 0.35;
 const MIN_NET_DT: f64 = 0.25;
 const UI_POLL_MS: u64 = 50;
+const PROCESS_NAME_COLUMN: usize = 78;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SortKey {
@@ -28,10 +29,14 @@ enum SortKey {
 
 struct ProcRow {
     pid: i32,
-    user: String,
     cpu_percent: f32,
     mem_percent: f32,
     power_watts: Option<f32>,
+    uptime_secs: u64,
+    shared_bytes: u64,
+    virtual_bytes: u64,
+    resident_bytes: u64,
+    priority: i64,
     name: String,
 }
 
@@ -129,6 +134,16 @@ fn human_uptime(seconds: u64) -> String {
     }
 }
 
+fn format_process_memory(bytes: u64, width: usize) -> String {
+    let mb = bytes as f64 / 1_000_000.0;
+    let value = if mb >= 1000.0 {
+        format!("{:.1}GB", mb / 1000.0)
+    } else {
+        format!("{:.1}MB", mb)
+    };
+    format!("{:>width$}", value, width = width)
+}
+
 fn progress_bar(percent: f32, width: usize) -> String {
     let width = max(10, width);
     let fill = ((percent / 100.0) * width as f32).round() as isize;
@@ -154,6 +169,49 @@ fn format_power_usage(watts: Option<f32>) -> String {
         Some(v) => format!("{:.1}W", v),
         None => "-".to_string(),
     }
+}
+
+fn page_size_bytes() -> u64 {
+    let page_sz = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    if page_sz <= 0 {
+        4096
+    } else {
+        page_sz as u64
+    }
+}
+
+fn read_shared_bytes(pid: i32, page_size: u64) -> u64 {
+    let path = format!("/proc/{}/statm", pid);
+    let Ok(content) = fs::read_to_string(path) else {
+        return 0;
+    };
+    let parts = content.split_whitespace().collect::<Vec<_>>();
+    if parts.len() < 3 {
+        return 0;
+    }
+    let Ok(shared_pages) = parts[2].parse::<u64>() else {
+        return 0;
+    };
+    shared_pages.saturating_mul(page_size)
+}
+
+fn read_process_priority(pid: i32) -> i64 {
+    let path = format!("/proc/{}/stat", pid);
+    let Ok(content) = fs::read_to_string(path) else {
+        return 0;
+    };
+
+    let Some(end_comm) = content.rfind(") ") else {
+        return 0;
+    };
+
+    let tail = &content[end_comm + 2..];
+    let fields = tail.split_whitespace().collect::<Vec<_>>();
+    if fields.len() < 16 {
+        return 0;
+    }
+
+    fields[15].parse::<i64>().unwrap_or(0)
 }
 
 fn now_text() -> String {
@@ -220,10 +278,15 @@ fn sample_memory_usage(system: &System) -> (u64, u64, f32) {
     if let Some(mi) = parse_meminfo() {
         // Linux "actual used" approximation:
         // used = total - free - buffers - (cached + reclaimable - shmem)
-        let effective_cache = mi.cached.saturating_add(mi.sreclaimable).saturating_sub(mi.shmem);
-        let mut used = mi
-            .total
-            .saturating_sub(mi.free.saturating_add(mi.buffers).saturating_add(effective_cache));
+        let effective_cache = mi
+            .cached
+            .saturating_add(mi.sreclaimable)
+            .saturating_sub(mi.shmem);
+        let mut used = mi.total.saturating_sub(
+            mi.free
+                .saturating_add(mi.buffers)
+                .saturating_add(effective_cache),
+        );
 
         // Fallback when formula is unstable on some kernels/containers.
         if mi.available > 0 && (used == 0 || used > mi.total) {
@@ -238,8 +301,8 @@ fn sample_memory_usage(system: &System) -> (u64, u64, f32) {
         return (used, mi.total, pct);
     }
 
-    let total = system.total_memory().saturating_mul(1024);
-    let used = system.used_memory().saturating_mul(1024);
+    let total = system.total_memory();
+    let used = system.used_memory();
     let pct = if total > 0 {
         (used as f64 / total as f64 * 100.0) as f32
     } else {
@@ -371,11 +434,21 @@ fn kill_process_tree(pid: i32) -> (bool, String) {
     if denied > 0 {
         return (
             false,
-            format!("Killed {} proc(s), denied {} for PID {}", killed, denied, pid),
+            format!(
+                "Killed {} proc(s), denied {} for PID {}",
+                killed, denied, pid
+            ),
         );
     }
 
-    (true, format!("Killed PID {} (and {} child proc(s))", pid, killed.saturating_sub(1)))
+    (
+        true,
+        format!(
+            "Killed PID {} (and {} child proc(s))",
+            pid,
+            killed.saturating_sub(1)
+        ),
+    )
 }
 
 fn parse_args() -> (f64, usize) {
@@ -414,9 +487,20 @@ fn truncate_to_width(s: &str, width: usize) -> String {
     s.chars().take(width).collect::<String>()
 }
 
-fn draw_line(stdout: &mut Stdout, row: u16, text: &str, width: u16, reverse: bool, bold: bool) -> io::Result<()> {
+fn draw_line(
+    stdout: &mut Stdout,
+    row: u16,
+    text: &str,
+    width: u16,
+    reverse: bool,
+    bold: bool,
+) -> io::Result<()> {
     let w = width as usize;
-    let shown = if w == 0 { "".to_string() } else { truncate_to_width(text, w) };
+    let shown = if w == 0 {
+        "".to_string()
+    } else {
+        truncate_to_width(text, w)
+    };
     let padded = if shown.chars().count() < w {
         format!("{}{}", shown, " ".repeat(w - shown.chars().count()))
     } else {
@@ -453,8 +537,12 @@ fn sample_disk_usage() -> (u64, u64) {
                         Err(io::Error::last_os_error())
                     }
                 } {
-                    let total = statvfs_result.f_blocks.saturating_mul(statvfs_result.f_frsize as u64);
-                    let available = statvfs_result.f_bavail.saturating_mul(statvfs_result.f_frsize as u64);
+                    let total = statvfs_result
+                        .f_blocks
+                        .saturating_mul(statvfs_result.f_frsize as u64);
+                    let available = statvfs_result
+                        .f_bavail
+                        .saturating_mul(statvfs_result.f_frsize as u64);
                     let used = total.saturating_sub(available);
                     return (total, used);
                 }
@@ -465,8 +553,14 @@ fn sample_disk_usage() -> (u64, u64) {
     (0, 0)
 }
 
-fn build_processes(system: &System, sort_key: SortKey, logical_cpus: usize, top: usize) -> (Vec<ProcRow>, usize) {
-    let total_mem_kib = system.total_memory().max(1);
+fn build_processes(
+    system: &System,
+    sort_key: SortKey,
+    logical_cpus: usize,
+    top: usize,
+) -> (Vec<ProcRow>, usize) {
+    let total_mem_bytes = system.total_memory().max(1);
+    let page_size = page_size_bytes();
     let mut rows = Vec::new();
 
     for (pid, proc_) in system.processes() {
@@ -475,22 +569,39 @@ fn build_processes(system: &System, sort_key: SortKey, logical_cpus: usize, top:
         }
 
         let cpu = proc_.cpu_usage();
-        let mem_pct = (proc_.memory() as f64 / total_mem_kib as f64 * 100.0) as f32;
+        let mem_pct = (proc_.memory() as f64 / total_mem_bytes as f64 * 100.0) as f32;
         let power = estimate_process_power_watts(cpu, logical_cpus);
+        let pid_i32 = pid.as_u32() as i32;
+        let resident_bytes = proc_.memory();
+        let virtual_bytes = proc_.virtual_memory();
+        let shared_bytes = read_shared_bytes(pid_i32, page_size);
+        let priority = read_process_priority(pid_i32);
 
         rows.push(ProcRow {
-            pid: pid.as_u32() as i32,
-            user: "-".to_string(),
+            pid: pid_i32,
             cpu_percent: cpu,
             mem_percent: mem_pct,
             power_watts: power,
+            uptime_secs: proc_.run_time(),
+            shared_bytes,
+            virtual_bytes,
+            resident_bytes,
+            priority,
             name: proc_.name().to_string(),
         });
     }
 
     match sort_key {
-        SortKey::Cpu => rows.sort_by(|a, b| b.cpu_percent.partial_cmp(&a.cpu_percent).unwrap_or(std::cmp::Ordering::Equal)),
-        SortKey::Mem => rows.sort_by(|a, b| b.mem_percent.partial_cmp(&a.mem_percent).unwrap_or(std::cmp::Ordering::Equal)),
+        SortKey::Cpu => rows.sort_by(|a, b| {
+            b.cpu_percent
+                .partial_cmp(&a.cpu_percent)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        }),
+        SortKey::Mem => rows.sort_by(|a, b| {
+            b.mem_percent
+                .partial_cmp(&a.mem_percent)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        }),
         SortKey::Power => rows.sort_by(|a, b| {
             b.power_watts
                 .unwrap_or(0.0)
@@ -527,7 +638,11 @@ fn sample_metrics(
     let host = system.host_name().unwrap_or_else(|| "unknown".to_string());
     let now_text = now_text();
 
-    let cpu_per_core = system.cpus().iter().map(|c| c.cpu_usage()).collect::<Vec<_>>();
+    let cpu_per_core = system
+        .cpus()
+        .iter()
+        .map(|c| c.cpu_usage())
+        .collect::<Vec<_>>();
     let cpu_total = if cpu_per_core.is_empty() {
         0.0
     } else {
@@ -538,8 +653,8 @@ fn sample_metrics(
     let uptime_text = human_uptime(system.uptime());
 
     let (mem_used, mem_total, mem_percent) = sample_memory_usage(system);
-    let swap_total = system.total_swap().saturating_mul(1024);
-    let swap_used = system.used_swap().saturating_mul(1024);
+    let swap_total = system.total_swap();
+    let swap_used = system.used_swap();
     let swap_percent = if swap_total > 0 {
         (swap_used as f64 / swap_total as f64 * 100.0) as f32
     } else {
@@ -659,7 +774,10 @@ fn run_app(refresh_rate: f64, top: usize) -> io::Result<()> {
                             app.search_input.clear();
                         }
                         KeyCode::Char(c) => {
-                            if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+                            if !key
+                                .modifiers
+                                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                            {
                                 app.search_input.push(c);
                             }
                         }
@@ -693,7 +811,8 @@ fn run_app(refresh_rate: f64, top: usize) -> io::Result<()> {
                                 app.status_message = "No process to lock".to_string();
                                 app.status_until = Instant::now() + Duration::from_secs(2);
                             } else {
-                                app.selected_index = min(app.selected_index, metrics.procs.len() - 1);
+                                app.selected_index =
+                                    min(app.selected_index, metrics.procs.len() - 1);
                                 let sel_pid = metrics.procs[app.selected_index].pid;
                                 if app.locked_pid == Some(sel_pid) {
                                     app.locked_pid = None;
@@ -705,10 +824,14 @@ fn run_app(refresh_rate: f64, top: usize) -> io::Result<()> {
                                 app.status_until = Instant::now() + Duration::from_secs(2);
                             }
                         }
-                        KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J') if app.locked_pid.is_none() => {
+                        KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J')
+                            if app.locked_pid.is_none() =>
+                        {
                             app.selected_index = app.selected_index.saturating_add(1);
                         }
-                        KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') if app.locked_pid.is_none() => {
+                        KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K')
+                            if app.locked_pid.is_none() =>
+                        {
                             app.selected_index = app.selected_index.saturating_sub(1);
                         }
                         KeyCode::PageDown if app.locked_pid.is_none() => {
@@ -718,13 +841,16 @@ fn run_app(refresh_rate: f64, top: usize) -> io::Result<()> {
                             app.selected_index = app.selected_index.saturating_sub(20);
                         }
                         KeyCode::Home if app.locked_pid.is_none() => app.selected_index = 0,
-                        KeyCode::End if app.locked_pid.is_none() => app.selected_index = usize::MAX / 2,
+                        KeyCode::End if app.locked_pid.is_none() => {
+                            app.selected_index = usize::MAX / 2
+                        }
                         KeyCode::Char('X') | KeyCode::Char('x') => {
                             if metrics.procs.is_empty() {
                                 app.status_message = "No process selected".to_string();
                                 app.status_until = Instant::now() + Duration::from_secs(2);
                             } else {
-                                app.selected_index = min(app.selected_index, metrics.procs.len() - 1);
+                                app.selected_index =
+                                    min(app.selected_index, metrics.procs.len() - 1);
                                 let pid = metrics.procs[app.selected_index].pid;
                                 let (ok, msg) = kill_process_tree(pid);
                                 app.status_message = msg;
@@ -889,7 +1015,14 @@ fn run_app(refresh_rate: f64, top: usize) -> io::Result<()> {
             .map(|(i, v)| format!("C{}:{:>4.0}%", i, v))
             .collect::<Vec<_>>()
             .join(" ");
-        draw_line(&mut stdout, 10, &format!("Cores    : {}", cores), w, false, false)?;
+        draw_line(
+            &mut stdout,
+            10,
+            &format!("Cores    : {}", cores),
+            w,
+            false,
+            false,
+        )?;
 
         let sort_label = match app.sort_key {
             SortKey::Cpu => "CPU",
@@ -910,14 +1043,11 @@ fn run_app(refresh_rate: f64, top: usize) -> io::Result<()> {
             proc_header.push_str(&format!(" | LOCK PID {}", pid));
         }
         draw_line(&mut stdout, 12, &proc_header, w, false, true)?;
-        draw_line(
-            &mut stdout,
-            13,
-            "PID      USER            CPU%   MEM%     PWR   NAME",
-            w,
-            false,
-            true,
-        )?;
+        let table_header = format!(
+            "{:>8} {:>5}  {:>5}  {:>4}  {:>11} {:>8} {:>9} {:>8}  {:>6}  {}",
+            "PID", "CPU%", "MEM%", "PRI", "UPTIME", "SHR", "VIRT", "RES", "PWR", "NAME"
+        );
+        draw_line(&mut stdout, 13, &table_header, w, false, true)?;
 
         if metrics.procs.is_empty() {
             app.selected_index = 0;
@@ -943,14 +1073,18 @@ fn run_app(refresh_rate: f64, top: usize) -> io::Result<()> {
                 break;
             }
             let absolute_index = app.scroll_offset + idx;
-            let name_w = w as usize - 46;
+            let name_w = (w as usize).saturating_sub(PROCESS_NAME_COLUMN);
             let name = truncate_to_width(&p.name, max(1, name_w));
             let line = format!(
-                "{:<8} {:<14} {:>5.1}  {:>5.1}  {:>6}  {}",
+                "{:>8} {:>5.1}  {:>5.1}  {:>4}  {:>11} {:>8} {:>9} {:>8}  {:>6}  {}",
                 p.pid,
-                truncate_to_width(&p.user, 14),
                 p.cpu_percent,
                 p.mem_percent,
+                p.priority,
+                human_uptime(p.uptime_secs),
+                format_process_memory(p.shared_bytes, 8),
+                format_process_memory(p.virtual_bytes, 9),
+                format_process_memory(p.resident_bytes, 8),
                 format_power_usage(p.power_watts),
                 name
             );
@@ -992,7 +1126,12 @@ fn run_app(refresh_rate: f64, top: usize) -> io::Result<()> {
                 w.saturating_sub(1),
                 ("Search   : ".chars().count() + app.search_input.chars().count()) as u16,
             );
-            queue!(stdout, Show, SetCursorStyle::BlinkingBlock, MoveTo(cursor_x, h - 2))?;
+            queue!(
+                stdout,
+                Show,
+                SetCursorStyle::BlinkingBlock,
+                MoveTo(cursor_x, h - 2)
+            )?;
         } else {
             queue!(stdout, Hide)?;
         }
