@@ -9,7 +9,7 @@ All notable changes in this project from the beginning.
 - Added per-process priority column sourced from Linux `/proc/<pid>/stat`.
 - Updated process row formatting and column widths to improve table alignment.
 - Updated process memory presentation formatting for clearer per-column measurements.
-- Known issue: table alignment may still overflow on narrow terminals; further layout tuning needed.
+- Fixed narrow-terminal process table overflow by switching between full, compact, and tiny responsive layouts.
 
 ## 2026-04-27
 

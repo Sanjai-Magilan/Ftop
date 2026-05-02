@@ -20,7 +20,6 @@ const MIN_DISPLAY_POWER_W: f32 = 0.1;
 const NET_EMA_ALPHA: f64 = 0.35;
 const MIN_NET_DT: f64 = 0.25;
 const UI_POLL_MS: u64 = 50;
-const PROCESS_NAME_COLUMN: usize = 78;
 const COLOR_APP_BG: Color = Color::Rgb {
     r: 13,
     g: 17,
@@ -77,6 +76,13 @@ enum SortKey {
     Cpu,
     Mem,
     Power,
+}
+
+#[derive(Clone, Copy)]
+enum ProcessTableMode {
+    Full,
+    Compact,
+    Tiny,
 }
 
 struct ProcRow {
@@ -202,6 +208,82 @@ fn format_process_memory(bytes: u64, width: usize) -> String {
         format!("{:.1}MB", mb)
     };
     format!("{:>width$}", value, width = width)
+}
+
+fn process_table_mode(width: usize) -> ProcessTableMode {
+    if width >= 96 {
+        ProcessTableMode::Full
+    } else if width >= 78 {
+        ProcessTableMode::Compact
+    } else {
+        ProcessTableMode::Tiny
+    }
+}
+
+fn process_table_fixed_width(mode: ProcessTableMode) -> usize {
+    match mode {
+        ProcessTableMode::Full => 78,
+        ProcessTableMode::Compact => 60,
+        ProcessTableMode::Tiny => 33,
+    }
+}
+
+fn process_table_header(mode: ProcessTableMode) -> String {
+    match mode {
+        ProcessTableMode::Full => format!(
+            "{:>8} {:>5}  {:>5}  {:>4}  {:>11} {:>8} {:>9} {:>8}  {:>6}  {}",
+            "PID", "CPU%", "MEM%", "PRI", "UPTIME", "SHR", "VIRT", "RES", "PWR", "NAME"
+        ),
+        ProcessTableMode::Compact => format!(
+            "{:>8} {:>5}  {:>5}  {:>8} {:>9} {:>8}  {:>6}  {}",
+            "PID", "CPU%", "MEM%", "SHR", "VIRT", "RES", "PWR", "NAME"
+        ),
+        ProcessTableMode::Tiny => format!(
+            "{:>8} {:>5}  {:>5}  {:>8}  {}",
+            "PID", "CPU%", "MEM%", "RES", "NAME"
+        ),
+    }
+}
+
+fn process_table_row(p: &ProcRow, mode: ProcessTableMode, width: usize) -> String {
+    let fixed_width = process_table_fixed_width(mode);
+    let name_w = width.saturating_sub(fixed_width).max(1);
+    let name = truncate_to_width(&p.name, name_w);
+
+    match mode {
+        ProcessTableMode::Full => format!(
+            "{:>8} {:>5.1}  {:>5.1}  {:>4}  {:>11} {:>8} {:>9} {:>8}  {:>6}  {}",
+            p.pid,
+            p.cpu_percent,
+            p.mem_percent,
+            p.priority,
+            human_uptime(p.uptime_secs),
+            format_process_memory(p.shared_bytes, 8),
+            format_process_memory(p.virtual_bytes, 9),
+            format_process_memory(p.resident_bytes, 8),
+            format_power_usage(p.power_watts),
+            name
+        ),
+        ProcessTableMode::Compact => format!(
+            "{:>8} {:>5.1}  {:>5.1}  {:>8} {:>9} {:>8}  {:>6}  {}",
+            p.pid,
+            p.cpu_percent,
+            p.mem_percent,
+            format_process_memory(p.shared_bytes, 8),
+            format_process_memory(p.virtual_bytes, 9),
+            format_process_memory(p.resident_bytes, 8),
+            format_power_usage(p.power_watts),
+            name
+        ),
+        ProcessTableMode::Tiny => format!(
+            "{:>8} {:>5.1}  {:>5.1}  {:>8}  {}",
+            p.pid,
+            p.cpu_percent,
+            p.mem_percent,
+            format_process_memory(p.resident_bytes, 8),
+            name
+        ),
+    }
 }
 
 fn progress_bar(percent: f32, width: usize) -> String {
@@ -1299,10 +1381,9 @@ fn run_app(refresh_rate: f64, top: usize) -> io::Result<()> {
             proc_header.push_str(&format!(" | LOCK PID {}", pid));
         }
         draw_box(&mut stdout, proc_rect, &proc_header, COLOR_CYAN)?;
-        let table_header = format!(
-            "{:>8} {:>5}  {:>5}  {:>4}  {:>11} {:>8} {:>9} {:>8}  {:>6}  {}",
-            "PID", "CPU%", "MEM%", "PRI", "UPTIME", "SHR", "VIRT", "RES", "PWR", "NAME"
-        );
+        let table_width = proc_rect.w.saturating_sub(2) as usize;
+        let table_mode = process_table_mode(table_width);
+        let table_header = process_table_header(table_mode);
         draw_panel_line(
             &mut stdout,
             proc_rect,
@@ -1334,22 +1415,7 @@ fn run_app(refresh_rate: f64, top: usize) -> io::Result<()> {
 
         for (idx, p) in visible.iter().enumerate() {
             let absolute_index = app.scroll_offset + idx;
-            let name_w =
-                (proc_rect.w.saturating_sub(2) as usize).saturating_sub(PROCESS_NAME_COLUMN);
-            let name = truncate_to_width(&p.name, max(1, name_w));
-            let line = format!(
-                "{:>8} {:>5.1}  {:>5.1}  {:>4}  {:>11} {:>8} {:>9} {:>8}  {:>6}  {}",
-                p.pid,
-                p.cpu_percent,
-                p.mem_percent,
-                p.priority,
-                human_uptime(p.uptime_secs),
-                format_process_memory(p.shared_bytes, 8),
-                format_process_memory(p.virtual_bytes, 9),
-                format_process_memory(p.resident_bytes, 8),
-                format_power_usage(p.power_watts),
-                name
-            );
+            let line = process_table_row(p, table_mode, table_width);
             let selected = absolute_index == app.selected_index;
             draw_segment(
                 &mut stdout,
