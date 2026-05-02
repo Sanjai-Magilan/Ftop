@@ -2,6 +2,15 @@
 
 All notable changes in this project from the beginning.
 
+## 2026-05-02
+
+- Added per-process runtime (uptime) to the process table.
+- Added per-process memory detail columns: shared memory, virtual memory, and resident memory.
+- Added per-process priority column sourced from Linux `/proc/<pid>/stat`.
+- Updated process row formatting and column widths to improve table alignment.
+- Updated process memory presentation formatting for clearer per-column measurements.
+- Known issue: table alignment may still overflow on narrow terminals; further layout tuning needed.
+
 ## 2026-04-27
 
 - Migrated SysWatcher from Python to Rust.

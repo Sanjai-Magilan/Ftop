@@ -1,6 +1,8 @@
 use crossterm::cursor::{Hide, MoveTo, SetCursorStyle, Show};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use crossterm::style::{Attribute, Print, SetAttribute};
+use crossterm::style::{
+    Attribute, Color, Print, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
+};
 use crossterm::terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::{execute, queue};
 use libc::{kill, SIGKILL};
@@ -19,6 +21,56 @@ const NET_EMA_ALPHA: f64 = 0.35;
 const MIN_NET_DT: f64 = 0.25;
 const UI_POLL_MS: u64 = 50;
 const PROCESS_NAME_COLUMN: usize = 78;
+const COLOR_APP_BG: Color = Color::Rgb {
+    r: 13,
+    g: 17,
+    b: 23,
+};
+const COLOR_PANEL_BG: Color = Color::Rgb {
+    r: 17,
+    g: 24,
+    b: 39,
+};
+const COLOR_TEXT: Color = Color::Rgb {
+    r: 226,
+    g: 232,
+    b: 240,
+};
+const COLOR_MUTED: Color = Color::Rgb {
+    r: 148,
+    g: 163,
+    b: 184,
+};
+const COLOR_CYAN: Color = Color::Rgb {
+    r: 56,
+    g: 189,
+    b: 248,
+};
+const COLOR_PURPLE: Color = Color::Rgb {
+    r: 167,
+    g: 139,
+    b: 250,
+};
+const COLOR_GREEN: Color = Color::Rgb {
+    r: 52,
+    g: 211,
+    b: 153,
+};
+const COLOR_YELLOW: Color = Color::Rgb {
+    r: 251,
+    g: 191,
+    b: 36,
+};
+const COLOR_RED: Color = Color::Rgb {
+    r: 251,
+    g: 113,
+    b: 133,
+};
+const COLOR_SELECT_BG: Color = Color::Rgb {
+    r: 37,
+    g: 99,
+    b: 235,
+};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SortKey {
@@ -89,6 +141,14 @@ struct AppState {
     force_refresh: bool,
     down_rate_ema: f64,
     up_rate_ema: f64,
+}
+
+#[derive(Clone, Copy)]
+struct Rect {
+    x: u16,
+    y: u16,
+    w: u16,
+    h: u16,
 }
 
 impl Default for AppState {
@@ -487,27 +547,52 @@ fn truncate_to_width(s: &str, width: usize) -> String {
     s.chars().take(width).collect::<String>()
 }
 
-fn draw_line(
+fn fit_to_width(text: &str, width: usize) -> String {
+    let shown = if width == 0 {
+        String::new()
+    } else {
+        truncate_to_width(text, width)
+    };
+    let shown_width = shown.chars().count();
+    if shown_width < width {
+        format!("{}{}", shown, " ".repeat(width - shown_width))
+    } else {
+        shown
+    }
+}
+
+fn usage_color(percent: f32) -> Color {
+    if percent >= 85.0 {
+        COLOR_RED
+    } else if percent >= 65.0 {
+        COLOR_YELLOW
+    } else {
+        COLOR_GREEN
+    }
+}
+
+fn draw_segment(
     stdout: &mut Stdout,
-    row: u16,
+    x: u16,
+    y: u16,
     text: &str,
     width: u16,
+    fg: Option<Color>,
+    bg: Option<Color>,
     reverse: bool,
     bold: bool,
 ) -> io::Result<()> {
-    let w = width as usize;
-    let shown = if w == 0 {
-        "".to_string()
-    } else {
-        truncate_to_width(text, w)
-    };
-    let padded = if shown.chars().count() < w {
-        format!("{}{}", shown, " ".repeat(w - shown.chars().count()))
-    } else {
-        shown
-    };
+    if width == 0 {
+        return Ok(());
+    }
 
-    queue!(stdout, MoveTo(0, row))?;
+    queue!(stdout, MoveTo(x, y))?;
+    if let Some(color) = fg {
+        queue!(stdout, SetForegroundColor(color))?;
+    }
+    if let Some(color) = bg {
+        queue!(stdout, SetBackgroundColor(color))?;
+    }
     if reverse {
         queue!(stdout, SetAttribute(Attribute::Reverse))?;
     }
@@ -515,9 +600,119 @@ fn draw_line(
         queue!(stdout, SetAttribute(Attribute::Bold))?;
     }
 
-    queue!(stdout, Print(padded))?;
-    queue!(stdout, SetAttribute(Attribute::Reset))?;
+    queue!(stdout, Print(fit_to_width(text, width as usize)))?;
+    queue!(stdout, ResetColor, SetAttribute(Attribute::Reset))?;
     Ok(())
+}
+
+fn draw_box(stdout: &mut Stdout, rect: Rect, title: &str, color: Color) -> io::Result<()> {
+    if rect.w < 2 || rect.h < 2 {
+        return Ok(());
+    }
+
+    let inner_w = rect.w.saturating_sub(2) as usize;
+    let title_text = if title.is_empty() {
+        String::new()
+    } else {
+        format!(" {} ", title)
+    };
+    let title_width = title_text.chars().count();
+    let top_middle = if title_width >= inner_w {
+        truncate_to_width(&title_text, inner_w)
+    } else {
+        format!("{}{}", title_text, "─".repeat(inner_w - title_width))
+    };
+    draw_segment(
+        stdout,
+        rect.x,
+        rect.y,
+        &format!("╭{}╮", top_middle),
+        rect.w,
+        Some(color),
+        Some(COLOR_PANEL_BG),
+        false,
+        true,
+    )?;
+
+    for y in rect.y + 1..rect.y + rect.h.saturating_sub(1) {
+        draw_segment(
+            stdout,
+            rect.x,
+            y,
+            &format!("│{}│", " ".repeat(inner_w)),
+            rect.w,
+            Some(COLOR_MUTED),
+            Some(COLOR_PANEL_BG),
+            false,
+            false,
+        )?;
+    }
+
+    draw_segment(
+        stdout,
+        rect.x,
+        rect.y + rect.h.saturating_sub(1),
+        &format!("╰{}╯", "─".repeat(inner_w)),
+        rect.w,
+        Some(color),
+        Some(COLOR_PANEL_BG),
+        false,
+        true,
+    )
+}
+
+fn draw_panel_line(
+    stdout: &mut Stdout,
+    rect: Rect,
+    row: u16,
+    text: &str,
+    fg: Option<Color>,
+    reverse: bool,
+    bold: bool,
+) -> io::Result<()> {
+    if rect.w <= 2 || rect.h <= 2 || row >= rect.h - 2 {
+        return Ok(());
+    }
+    draw_segment(
+        stdout,
+        rect.x + 1,
+        rect.y + 1 + row,
+        text,
+        rect.w - 2,
+        fg,
+        Some(COLOR_PANEL_BG),
+        reverse,
+        bold,
+    )
+}
+
+fn draw_meter(
+    stdout: &mut Stdout,
+    rect: Rect,
+    row: u16,
+    label: &str,
+    percent: f32,
+    detail: &str,
+) -> io::Result<()> {
+    let inner_w = rect.w.saturating_sub(2) as usize;
+    let fixed_w = label.chars().count() + detail.chars().count() + 13;
+    let bar_w = max(8, inner_w.saturating_sub(fixed_w));
+    let line = format!(
+        "{:<7} {:>5.1}% [{}] {}",
+        label,
+        percent,
+        progress_bar(percent, bar_w),
+        detail
+    );
+    draw_panel_line(
+        stdout,
+        rect,
+        row,
+        &line,
+        Some(usage_color(percent)),
+        false,
+        false,
+    )
 }
 
 fn sample_disk_usage() -> (u64, u64) {
@@ -901,12 +1096,15 @@ fn run_app(refresh_rate: f64, top: usize) -> io::Result<()> {
         let (w, h) = terminal::size()?;
         queue!(stdout, MoveTo(0, 0), Clear(ClearType::All))?;
 
-        if h < 8 || w < 40 {
-            draw_line(
+        if h < 18 || w < 72 {
+            draw_segment(
                 &mut stdout,
                 0,
-                "Terminal too small. Resize window (min 40x8). Press q to quit.",
+                0,
+                "Terminal too small. Resize window (min 72x18). Press q to quit.",
                 w,
+                Some(COLOR_RED),
+                Some(COLOR_APP_BG),
                 false,
                 false,
             )?;
@@ -914,112 +1112,170 @@ fn run_app(refresh_rate: f64, top: usize) -> io::Result<()> {
             continue;
         }
 
-        let bar_w = max(10, min(40, w as usize - 38));
-        let visible_rows = max(1, h as usize - 16);
+        for y in 0..h {
+            draw_segment(
+                &mut stdout,
+                0,
+                y,
+                "",
+                w,
+                Some(COLOR_TEXT),
+                Some(COLOR_APP_BG),
+                false,
+                false,
+            )?;
+        }
 
-        draw_line(
+        let top_h = if h >= 30 { 10 } else { 8 };
+        let proc_y = 1 + top_h;
+        let proc_h = h.saturating_sub(proc_y + 2);
+        let left_w = if w >= 118 {
+            max(46, (w as usize * 48 / 100) as u16)
+        } else {
+            max(36, w / 2)
+        };
+        let right_w = w.saturating_sub(left_w);
+        let cpu_rect = Rect {
+            x: 0,
+            y: 1,
+            w: left_w,
+            h: top_h,
+        };
+        let sys_rect = Rect {
+            x: left_w,
+            y: 1,
+            w: right_w,
+            h: top_h,
+        };
+        let proc_rect = Rect {
+            x: 0,
+            y: proc_y,
+            w,
+            h: proc_h,
+        };
+
+        draw_segment(
             &mut stdout,
+            0,
             0,
             &format!(" SysWatcher • {} • {} ", metrics.host, metrics.now_text),
             w,
+            Some(COLOR_APP_BG),
+            Some(COLOR_CYAN),
+            false,
             true,
-            false,
         )?;
 
-        draw_line(
+        draw_box(&mut stdout, cpu_rect, "CPU", COLOR_CYAN)?;
+        draw_meter(
             &mut stdout,
+            cpu_rect,
+            0,
+            "Total",
+            metrics.cpu_total,
+            &format!(
+                "load {:.2} {:.2} {:.2}",
+                metrics.load_1, metrics.load_5, metrics.load_15
+            ),
+        )?;
+        draw_panel_line(
+            &mut stdout,
+            cpu_rect,
+            1,
+            &format!("Uptime  {}", metrics.uptime_text),
+            Some(COLOR_MUTED),
+            false,
+            false,
+        )?;
+        let core_inner = cpu_rect.w.saturating_sub(2) as usize;
+        let core_cols = if core_inner >= 50 { 2 } else { 1 };
+        let core_col_w = max(18, core_inner / core_cols);
+        let core_bar_w = max(4, core_col_w.saturating_sub(11));
+        for (idx, cpu) in metrics.cpu_per_core.iter().enumerate() {
+            let row = 2 + (idx / core_cols) as u16;
+            if row >= cpu_rect.h.saturating_sub(2) {
+                break;
+            }
+            let col = idx % core_cols;
+            let core_line = format!(
+                "C{:02} {:>3.0}% {}",
+                idx,
+                cpu,
+                progress_bar(*cpu, core_bar_w)
+            );
+            draw_segment(
+                &mut stdout,
+                cpu_rect.x + 1 + (col * core_col_w) as u16,
+                cpu_rect.y + 1 + row,
+                &core_line,
+                min(core_col_w, core_inner.saturating_sub(col * core_col_w)) as u16,
+                Some(usage_color(*cpu)),
+                Some(COLOR_PANEL_BG),
+                false,
+                false,
+            )?;
+        }
+
+        draw_box(&mut stdout, sys_rect, "Memory • Disk • Net", COLOR_PURPLE)?;
+        draw_meter(
+            &mut stdout,
+            sys_rect,
+            0,
+            "Memory",
+            metrics.mem_percent,
+            &format!(
+                "{}/{}",
+                human_bytes(metrics.mem_used as f64, 1),
+                human_bytes(metrics.mem_total as f64, 1)
+            ),
+        )?;
+        draw_meter(
+            &mut stdout,
+            sys_rect,
+            1,
+            "Swap",
+            metrics.swap_percent,
+            &format!(
+                "{}/{}",
+                human_bytes(metrics.swap_used as f64, 1),
+                human_bytes(metrics.swap_total as f64, 1)
+            ),
+        )?;
+        draw_meter(
+            &mut stdout,
+            sys_rect,
             2,
+            "Disk /",
+            metrics.disk_percent,
             &format!(
-                "CPU Total: {:5.1}%  [{}]",
-                metrics.cpu_total,
-                progress_bar(metrics.cpu_total, bar_w)
+                "{}/{}",
+                human_bytes(metrics.disk_used as f64, 1),
+                human_bytes(metrics.disk_total as f64, 1)
             ),
-            w,
+        )?;
+        draw_panel_line(
+            &mut stdout,
+            sys_rect,
+            4,
+            &format!(
+                "Down    {:>10}/s    Up {:>10}/s",
+                human_bytes(metrics.net_rate_down, 1),
+                human_bytes(metrics.net_rate_up, 1)
+            ),
+            Some(COLOR_GREEN),
             false,
             false,
         )?;
-        draw_line(
+        draw_panel_line(
             &mut stdout,
-            3,
-            &format!(
-                "Load Avg : {:.2}  {:.2}  {:.2}    Uptime: {}",
-                metrics.load_1, metrics.load_5, metrics.load_15, metrics.uptime_text
-            ),
-            w,
-            false,
-            false,
-        )?;
-
-        draw_line(
-            &mut stdout,
+            sys_rect,
             5,
             &format!(
-                "Memory   : {:5.1}%  {}/{}  [{}]",
-                metrics.mem_percent,
-                human_bytes(metrics.mem_used as f64, 2),
-                human_bytes(metrics.mem_total as f64, 2),
-                progress_bar(metrics.mem_percent, bar_w)
-            ),
-            w,
-            false,
-            false,
-        )?;
-        draw_line(
-            &mut stdout,
-            6,
-            &format!(
-                "Swap     : {:5.1}%  {}/{}  [{}]",
-                metrics.swap_percent,
-                human_bytes(metrics.swap_used as f64, 2),
-                human_bytes(metrics.swap_total as f64, 2),
-                progress_bar(metrics.swap_percent, bar_w)
-            ),
-            w,
-            false,
-            false,
-        )?;
-        draw_line(
-            &mut stdout,
-            7,
-            &format!(
-                "Disk /   : {:5.1}%  {}/{}  [{}]",
-                metrics.disk_percent,
-                human_bytes(metrics.disk_used as f64, 1),
-                human_bytes(metrics.disk_total as f64, 1),
-                progress_bar(metrics.disk_percent, bar_w)
-            ),
-            w,
-            false,
-            false,
-        )?;
-
-        draw_line(
-            &mut stdout,
-            9,
-            &format!(
-                "Network  : ↓ {}/s   ↑ {}/s   Total ↓ {} ↑ {}",
-                human_bytes(metrics.net_rate_down, 1),
-                human_bytes(metrics.net_rate_up, 1),
+                "Total ↓ {:>10}     ↑ {:>10}",
                 human_bytes(metrics.net_total_down as f64, 1),
                 human_bytes(metrics.net_total_up as f64, 1)
             ),
-            w,
-            false,
-            false,
-        )?;
-
-        let cores = metrics
-            .cpu_per_core
-            .iter()
-            .enumerate()
-            .map(|(i, v)| format!("C{}:{:>4.0}%", i, v))
-            .collect::<Vec<_>>()
-            .join(" ");
-        draw_line(
-            &mut stdout,
-            10,
-            &format!("Cores    : {}", cores),
-            w,
+            Some(COLOR_MUTED),
             false,
             false,
         )?;
@@ -1042,12 +1298,20 @@ fn run_app(refresh_rate: f64, top: usize) -> io::Result<()> {
         if let Some(pid) = app.locked_pid {
             proc_header.push_str(&format!(" | LOCK PID {}", pid));
         }
-        draw_line(&mut stdout, 12, &proc_header, w, false, true)?;
+        draw_box(&mut stdout, proc_rect, &proc_header, COLOR_CYAN)?;
         let table_header = format!(
             "{:>8} {:>5}  {:>5}  {:>4}  {:>11} {:>8} {:>9} {:>8}  {:>6}  {}",
             "PID", "CPU%", "MEM%", "PRI", "UPTIME", "SHR", "VIRT", "RES", "PWR", "NAME"
         );
-        draw_line(&mut stdout, 13, &table_header, w, false, true)?;
+        draw_panel_line(
+            &mut stdout,
+            proc_rect,
+            0,
+            &table_header,
+            Some(COLOR_PURPLE),
+            false,
+            true,
+        )?;
 
         if metrics.procs.is_empty() {
             app.selected_index = 0;
@@ -1055,6 +1319,7 @@ fn run_app(refresh_rate: f64, top: usize) -> io::Result<()> {
             app.selected_index = min(app.selected_index, metrics.procs.len() - 1);
         }
 
+        let visible_rows = max(1, proc_rect.h.saturating_sub(3) as usize);
         if app.selected_index < app.scroll_offset {
             app.scroll_offset = app.selected_index;
         } else if app.selected_index >= app.scroll_offset + visible_rows {
@@ -1067,13 +1332,10 @@ fn run_app(refresh_rate: f64, top: usize) -> io::Result<()> {
         let end_ix = min(metrics.procs.len(), app.scroll_offset + visible_rows);
         let visible = &metrics.procs[app.scroll_offset..end_ix];
 
-        let mut row = 14_u16;
         for (idx, p) in visible.iter().enumerate() {
-            if row >= h.saturating_sub(2) {
-                break;
-            }
             let absolute_index = app.scroll_offset + idx;
-            let name_w = (w as usize).saturating_sub(PROCESS_NAME_COLUMN);
+            let name_w =
+                (proc_rect.w.saturating_sub(2) as usize).saturating_sub(PROCESS_NAME_COLUMN);
             let name = truncate_to_width(&p.name, max(1, name_w));
             let line = format!(
                 "{:>8} {:>5.1}  {:>5.1}  {:>4}  {:>11} {:>8} {:>9} {:>8}  {:>6}  {}",
@@ -1088,15 +1350,26 @@ fn run_app(refresh_rate: f64, top: usize) -> io::Result<()> {
                 format_power_usage(p.power_watts),
                 name
             );
-            draw_line(
+            let selected = absolute_index == app.selected_index;
+            draw_segment(
                 &mut stdout,
-                row,
+                proc_rect.x + 1,
+                proc_rect.y + 2 + idx as u16,
                 &line,
-                w,
-                absolute_index == app.selected_index,
+                proc_rect.w.saturating_sub(2),
+                if selected {
+                    Some(Color::White)
+                } else {
+                    Some(COLOR_TEXT)
+                },
+                if selected {
+                    Some(COLOR_SELECT_BG)
+                } else {
+                    Some(COLOR_PANEL_BG)
+                },
                 false,
+                selected,
             )?;
-            row = row.saturating_add(1);
         }
 
         let mut bottom = String::new();
@@ -1110,7 +1383,17 @@ fn run_app(refresh_rate: f64, top: usize) -> io::Result<()> {
         } else if !app.status_message.is_empty() && Instant::now() < app.status_until {
             bottom = format!("Status   : {}", app.status_message);
         }
-        draw_line(&mut stdout, h - 2, &bottom, w, false, false)?;
+        draw_segment(
+            &mut stdout,
+            0,
+            h - 2,
+            &bottom,
+            w,
+            Some(COLOR_YELLOW),
+            Some(COLOR_APP_BG),
+            false,
+            false,
+        )?;
 
         let mut help =
             "q:quit  /:search  Enter:lock/unlock  ↑/↓ or j/k:move  PgUp/PgDn:page  Home/End  x:kill  c/m/p:sort  r:refresh".to_string();
@@ -1119,7 +1402,17 @@ fn run_app(refresh_rate: f64, top: usize) -> io::Result<()> {
             let end = min(metrics.procs.len(), app.scroll_offset + visible.len());
             help.push_str(&format!("  [{}-{}/{}]", pos, end, metrics.procs.len()));
         }
-        draw_line(&mut stdout, h - 1, &help, w, true, false)?;
+        draw_segment(
+            &mut stdout,
+            0,
+            h - 1,
+            &help,
+            w,
+            Some(COLOR_TEXT),
+            Some(COLOR_PANEL_BG),
+            false,
+            false,
+        )?;
 
         if app.search_mode {
             let cursor_x = min(
