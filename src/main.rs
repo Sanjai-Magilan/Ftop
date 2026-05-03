@@ -25,7 +25,7 @@ const MIN_NET_DT: f64 = 0.25;
 const UI_POLL_MS: u64 = 50;
 const METER_LABEL_WIDTH: usize = 7;
 const METER_DETAIL_WIDTH: usize = 18;
-const METER_STATIC_WIDTH: usize = METER_LABEL_WIDTH + METER_DETAIL_WIDTH + 11;
+const METER_STATIC_WIDTH: usize = METER_LABEL_WIDTH + METER_DETAIL_WIDTH + 55;
 const COLOR_APP_BG: Color = Color::Rgb(17, 17, 27);
 const COLOR_PANEL_BG: Color = Color::Rgb(30, 30, 46);
 const COLOR_TEXT: Color = Color::Rgb(205, 214, 244);
@@ -948,7 +948,7 @@ fn render_dashboard(frame: &mut Frame, app: &mut AppState, metrics: &RuntimeMetr
         return;
     }
 
-    let top_h = if area.height >= 30 { 10 } else { 8 };
+    let top_h = if area.height >= 30 { 8 } else { 6 };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -964,9 +964,9 @@ fn render_dashboard(frame: &mut Frame, app: &mut AppState, metrics: &RuntimeMetr
     let top_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage(80),
+            Constraint::Percentage(60),
             Constraint::Length(1),
-            Constraint::Percentage(20),
+            Constraint::Percentage(40),
         ])
         .split(chunks[1]);
 
