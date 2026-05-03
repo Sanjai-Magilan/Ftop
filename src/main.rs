@@ -657,6 +657,12 @@ fn core_line(idx: usize, cpu: f32, width: usize, selected: bool) -> Line<'static
     ])
 }
 
+fn cpu_core_columns(panel_width: usize, core_count: usize) -> usize {
+    let inner_width = panel_width.saturating_sub(2);
+    let by_width = max(1, inner_width / 18);
+    max(1, min(core_count.max(1), min(4, by_width)))
+}
+
 fn process_table_line(
     p: &ProcRow,
     mode: ProcessTableMode,
@@ -750,7 +756,7 @@ fn process_table_line(
 
 fn render_cpu_panel(frame: &mut Frame, area: TuiRect, metrics: &RuntimeMetrics) {
     let inner_width = area.width.saturating_sub(2) as usize;
-    let core_cols = min(4, metrics.cpu_per_core.len().max(1));
+    let core_cols = cpu_core_columns(area.width as usize, metrics.cpu_per_core.len());
     let core_col_w = max(13, inner_width / core_cols);
     let mut lines = vec![
         meter_line(
@@ -948,7 +954,11 @@ fn render_dashboard(frame: &mut Frame, app: &mut AppState, metrics: &RuntimeMetr
         return;
     }
 
-    let top_h = if area.height >= 30 { 8 } else { 6 };
+    let estimated_cpu_panel_width = area.width.saturating_sub(1) as usize * 60 / 100;
+    let estimated_cpu_cols = cpu_core_columns(estimated_cpu_panel_width, metrics.cpu_per_core.len());
+    let estimated_cpu_rows = (metrics.cpu_per_core.len() + estimated_cpu_cols - 1) / estimated_cpu_cols;
+    let top_h = max(8, estimated_cpu_rows + 4) as u16;
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
