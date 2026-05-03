@@ -1,16 +1,19 @@
-use crossterm::cursor::{Hide, MoveTo, SetCursorStyle, Show};
+use crossterm::cursor::{Hide, Show};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use crossterm::style::{
-    Attribute, Color, Print, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
-};
-use crossterm::terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen};
-use crossterm::{execute, queue};
+use crossterm::execute;
+use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use libc::{kill, SIGKILL};
+use ratatui::backend::CrosstermBackend;
+use ratatui::layout::{Constraint, Direction, Layout, Rect as TuiRect};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
+use ratatui::{Frame, Terminal};
 use std::cmp::{max, min};
 use std::collections::HashMap;
 use std::env;
 use std::fs;
-use std::io::{self, stdout, Stdout, Write};
+use std::io::{self, stdout};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use sysinfo::{CpuExt, PidExt, ProcessExt, ProcessStatus, System, SystemExt};
@@ -20,56 +23,75 @@ const MIN_DISPLAY_POWER_W: f32 = 0.1;
 const NET_EMA_ALPHA: f64 = 0.35;
 const MIN_NET_DT: f64 = 0.25;
 const UI_POLL_MS: u64 = 50;
-const COLOR_APP_BG: Color = Color::Rgb {
-    r: 13,
-    g: 17,
-    b: 23,
-};
-const COLOR_PANEL_BG: Color = Color::Rgb {
-    r: 17,
-    g: 24,
-    b: 39,
-};
-const COLOR_TEXT: Color = Color::Rgb {
-    r: 226,
-    g: 232,
-    b: 240,
-};
-const COLOR_MUTED: Color = Color::Rgb {
-    r: 148,
-    g: 163,
-    b: 184,
-};
-const COLOR_CYAN: Color = Color::Rgb {
-    r: 56,
-    g: 189,
-    b: 248,
-};
-const COLOR_PURPLE: Color = Color::Rgb {
-    r: 167,
-    g: 139,
-    b: 250,
-};
-const COLOR_GREEN: Color = Color::Rgb {
-    r: 52,
-    g: 211,
-    b: 153,
-};
-const COLOR_YELLOW: Color = Color::Rgb {
-    r: 251,
-    g: 191,
-    b: 36,
-};
-const COLOR_RED: Color = Color::Rgb {
-    r: 251,
-    g: 113,
-    b: 133,
-};
-const COLOR_SELECT_BG: Color = Color::Rgb {
-    r: 37,
-    g: 99,
-    b: 235,
-};
+const METER_LABEL_WIDTH: usize = 7;
+const METER_DETAIL_WIDTH: usize = 18;
+const METER_STATIC_WIDTH: usize = METER_LABEL_WIDTH + METER_DETAIL_WIDTH + 11;
+const COLOR_APP_BG: Color = Color::Rgb(17, 17, 27);
+const COLOR_PANEL_BG: Color = Color::Rgb(30, 30, 46);
+const COLOR_TEXT: Color = Color::Rgb(205, 214, 244);
+const COLOR_MUTED: Color = Color::Rgb(147, 153, 178);
+const COLOR_CYAN: Color = Color::Rgb(137, 220, 235);
+const COLOR_PURPLE: Color = Color::Rgb(203, 166, 247);
+const COLOR_GREEN: Color = Color::Rgb(166, 227, 161);
+const COLOR_YELLOW: Color = Color::Rgb(249, 226, 175);
+const COLOR_RED: Color = Color::Rgb(243, 139, 168);
+const COLOR_SELECT_BG: Color = Color::Rgb(69, 71, 90);
+
+mod theme {
+    use super::*;
+
+    pub fn base_style() -> Style {
+        Style::default().fg(COLOR_TEXT).bg(COLOR_APP_BG)
+    }
+
+    pub fn panel_style() -> Style {
+        Style::default().fg(COLOR_TEXT).bg(COLOR_PANEL_BG)
+    }
+
+    pub fn header_style() -> Style {
+        panel_style().fg(COLOR_CYAN).add_modifier(Modifier::BOLD)
+    }
+
+    pub fn title_style() -> Style {
+        panel_style().fg(COLOR_PURPLE).add_modifier(Modifier::BOLD)
+    }
+
+    pub fn label_style() -> Style {
+        panel_style().fg(COLOR_TEXT)
+    }
+
+    pub fn muted_style() -> Style {
+        panel_style().fg(COLOR_MUTED)
+    }
+
+    pub fn selected_style(style: Style) -> Style {
+        style.bg(COLOR_SELECT_BG)
+    }
+
+    pub fn status_style() -> Style {
+        base_style().fg(COLOR_YELLOW)
+    }
+
+    pub fn usage_style(percent: f64) -> Style {
+        let fg = if percent >= 85.0 {
+            COLOR_RED
+        } else if percent >= 65.0 {
+            COLOR_YELLOW
+        } else {
+            COLOR_GREEN
+        };
+        panel_style().fg(fg).add_modifier(Modifier::BOLD)
+    }
+
+    pub fn panel_block(title: impl Into<Line<'static>>) -> Block<'static> {
+        Block::default()
+            .title(title)
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(muted_style())
+            .style(panel_style())
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SortKey {
@@ -147,14 +169,6 @@ struct AppState {
     force_refresh: bool,
     down_rate_ema: f64,
     up_rate_ema: f64,
-}
-
-#[derive(Clone, Copy)]
-struct Rect {
-    x: u16,
-    y: u16,
-    w: u16,
-    h: u16,
 }
 
 impl Default for AppState {
@@ -241,47 +255,6 @@ fn process_table_header(mode: ProcessTableMode) -> String {
         ProcessTableMode::Tiny => format!(
             "{:>8} {:>5}  {:>5}  {:>8}  {}",
             "PID", "CPU%", "MEM%", "RES", "NAME"
-        ),
-    }
-}
-
-fn process_table_row(p: &ProcRow, mode: ProcessTableMode, width: usize) -> String {
-    let fixed_width = process_table_fixed_width(mode);
-    let name_w = width.saturating_sub(fixed_width).max(1);
-    let name = truncate_to_width(&p.name, name_w);
-
-    match mode {
-        ProcessTableMode::Full => format!(
-            "{:>8} {:>5.1}  {:>5.1}  {:>4}  {:>11} {:>8} {:>9} {:>8}  {:>6}  {}",
-            p.pid,
-            p.cpu_percent,
-            p.mem_percent,
-            p.priority,
-            human_uptime(p.uptime_secs),
-            format_process_memory(p.shared_bytes, 8),
-            format_process_memory(p.virtual_bytes, 9),
-            format_process_memory(p.resident_bytes, 8),
-            format_power_usage(p.power_watts),
-            name
-        ),
-        ProcessTableMode::Compact => format!(
-            "{:>8} {:>5.1}  {:>5.1}  {:>8} {:>9} {:>8}  {:>6}  {}",
-            p.pid,
-            p.cpu_percent,
-            p.mem_percent,
-            format_process_memory(p.shared_bytes, 8),
-            format_process_memory(p.virtual_bytes, 9),
-            format_process_memory(p.resident_bytes, 8),
-            format_power_usage(p.power_watts),
-            name
-        ),
-        ProcessTableMode::Tiny => format!(
-            "{:>8} {:>5.1}  {:>5.1}  {:>8}  {}",
-            p.pid,
-            p.cpu_percent,
-            p.mem_percent,
-            format_process_memory(p.resident_bytes, 8),
-            name
         ),
     }
 }
@@ -629,172 +602,433 @@ fn truncate_to_width(s: &str, width: usize) -> String {
     s.chars().take(width).collect::<String>()
 }
 
-fn fit_to_width(text: &str, width: usize) -> String {
-    let shown = if width == 0 {
-        String::new()
+fn meter_line(label: &str, percent: f32, detail: &str, width: usize) -> Line<'static> {
+    let bar_w = max(10, width.saturating_sub(METER_STATIC_WIDTH));
+    Line::from(vec![
+        Span::styled(
+            format!("{:<label_width$} ", label, label_width = METER_LABEL_WIDTH),
+            theme::label_style(),
+        ),
+        Span::styled(
+            format!("{:>5.1}%", percent),
+            theme::usage_style(percent as f64),
+        ),
+        Span::styled(" [", theme::muted_style()),
+        Span::styled(
+            progress_bar(percent, bar_w),
+            theme::usage_style(percent as f64),
+        ),
+        Span::styled("] ", theme::muted_style()),
+        Span::styled(detail.to_string(), theme::muted_style()),
+    ])
+}
+
+fn row_style(style: Style, selected: bool) -> Style {
+    if selected {
+        theme::selected_style(style)
     } else {
-        truncate_to_width(text, width)
-    };
-    let shown_width = shown.chars().count();
-    if shown_width < width {
-        format!("{}{}", shown, " ".repeat(width - shown_width))
-    } else {
-        shown
+        style
     }
 }
 
-fn usage_color(percent: f32) -> Color {
-    if percent >= 85.0 {
-        COLOR_RED
-    } else if percent >= 65.0 {
-        COLOR_YELLOW
-    } else {
-        COLOR_GREEN
+fn title_line(title: impl Into<String>, style: Style) -> Line<'static> {
+    Line::from(Span::styled(format!(" {} ", title.into()), style))
+}
+
+fn text_span(text: impl Into<String>, style: Style, selected: bool) -> Span<'static> {
+    Span::styled(text.into(), row_style(style, selected))
+}
+
+fn core_line(idx: usize, cpu: f32, width: usize, selected: bool) -> Line<'static> {
+    let bar_w = max(4, width.saturating_sub(11));
+    Line::from(vec![
+        text_span(format!("C{:02} ", idx), theme::label_style(), selected),
+        text_span(
+            format!("{:>3.0}%", cpu),
+            theme::usage_style(cpu as f64),
+            selected,
+        ),
+        text_span(" ", theme::muted_style(), selected),
+        text_span(
+            progress_bar(cpu, bar_w),
+            theme::usage_style(cpu as f64),
+            selected,
+        ),
+    ])
+}
+
+fn process_table_line(
+    p: &ProcRow,
+    mode: ProcessTableMode,
+    width: usize,
+    selected: bool,
+) -> Line<'static> {
+    let fixed_width = process_table_fixed_width(mode);
+    let name_w = width.saturating_sub(fixed_width).max(1);
+    let name = truncate_to_width(&p.name, name_w);
+
+    match mode {
+        ProcessTableMode::Full => Line::from(vec![
+            text_span(format!("{:>8} ", p.pid), theme::muted_style(), selected),
+            text_span(
+                format!("{:>5.1}", p.cpu_percent),
+                theme::usage_style(p.cpu_percent as f64),
+                selected,
+            ),
+            text_span("  ", theme::muted_style(), selected),
+            text_span(
+                format!("{:>5.1}", p.mem_percent),
+                theme::usage_style(p.mem_percent as f64),
+                selected,
+            ),
+            text_span(
+                format!(
+                    "  {:>4}  {:>11} {:>8} {:>9} {:>8}  {:>6}  {}",
+                    p.priority,
+                    human_uptime(p.uptime_secs),
+                    format_process_memory(p.shared_bytes, 8),
+                    format_process_memory(p.virtual_bytes, 9),
+                    format_process_memory(p.resident_bytes, 8),
+                    format_power_usage(p.power_watts),
+                    name
+                ),
+                theme::label_style(),
+                selected,
+            ),
+        ]),
+        ProcessTableMode::Compact => Line::from(vec![
+            text_span(format!("{:>8} ", p.pid), theme::muted_style(), selected),
+            text_span(
+                format!("{:>5.1}", p.cpu_percent),
+                theme::usage_style(p.cpu_percent as f64),
+                selected,
+            ),
+            text_span("  ", theme::muted_style(), selected),
+            text_span(
+                format!("{:>5.1}", p.mem_percent),
+                theme::usage_style(p.mem_percent as f64),
+                selected,
+            ),
+            text_span(
+                format!(
+                    "  {:>8} {:>9} {:>8}  {:>6}  {}",
+                    format_process_memory(p.shared_bytes, 8),
+                    format_process_memory(p.virtual_bytes, 9),
+                    format_process_memory(p.resident_bytes, 8),
+                    format_power_usage(p.power_watts),
+                    name
+                ),
+                theme::label_style(),
+                selected,
+            ),
+        ]),
+        ProcessTableMode::Tiny => Line::from(vec![
+            text_span(format!("{:>8} ", p.pid), theme::muted_style(), selected),
+            text_span(
+                format!("{:>5.1}", p.cpu_percent),
+                theme::usage_style(p.cpu_percent as f64),
+                selected,
+            ),
+            text_span("  ", theme::muted_style(), selected),
+            text_span(
+                format!("{:>5.1}", p.mem_percent),
+                theme::usage_style(p.mem_percent as f64),
+                selected,
+            ),
+            text_span(
+                format!(
+                    "  {:>8}  {}",
+                    format_process_memory(p.resident_bytes, 8),
+                    name
+                ),
+                theme::label_style(),
+                selected,
+            ),
+        ]),
     }
 }
 
-fn draw_segment(
-    stdout: &mut Stdout,
-    x: u16,
-    y: u16,
-    text: &str,
-    width: u16,
-    fg: Option<Color>,
-    bg: Option<Color>,
-    reverse: bool,
-    bold: bool,
-) -> io::Result<()> {
-    if width == 0 {
-        return Ok(());
+fn render_cpu_panel(frame: &mut Frame, area: TuiRect, metrics: &RuntimeMetrics) {
+    let inner_width = area.width.saturating_sub(2) as usize;
+    let core_cols = min(4, metrics.cpu_per_core.len().max(1));
+    let core_col_w = max(13, inner_width / core_cols);
+    let mut lines = vec![
+        meter_line(
+            "Total",
+            metrics.cpu_total,
+            &format!(
+                "load {:.2} {:.2} {:.2}",
+                metrics.load_1, metrics.load_5, metrics.load_15
+            ),
+            inner_width,
+        ),
+        Line::from(vec![
+            Span::styled("Uptime  ", theme::label_style()),
+            Span::styled(metrics.uptime_text.clone(), theme::muted_style()),
+        ]),
+    ];
+
+    for (row_idx, row_cpus) in metrics.cpu_per_core.chunks(core_cols).enumerate() {
+        let mut spans = Vec::new();
+        for (col, cpu) in row_cpus.iter().enumerate() {
+            if col > 0 {
+                spans.push(Span::styled("  ", theme::muted_style()));
+            }
+            let idx = row_idx * core_cols + col;
+            let line = core_line(idx, *cpu, core_col_w, false);
+            for span in line.spans {
+                spans.push(span);
+            }
+        }
+        lines.push(Line::from(spans));
     }
 
-    queue!(stdout, MoveTo(x, y))?;
-    if let Some(color) = fg {
-        queue!(stdout, SetForegroundColor(color))?;
-    }
-    if let Some(color) = bg {
-        queue!(stdout, SetBackgroundColor(color))?;
-    }
-    if reverse {
-        queue!(stdout, SetAttribute(Attribute::Reverse))?;
-    }
-    if bold {
-        queue!(stdout, SetAttribute(Attribute::Bold))?;
-    }
-
-    queue!(stdout, Print(fit_to_width(text, width as usize)))?;
-    queue!(stdout, ResetColor, SetAttribute(Attribute::Reset))?;
-    Ok(())
-}
-
-fn draw_box(stdout: &mut Stdout, rect: Rect, title: &str, color: Color) -> io::Result<()> {
-    if rect.w < 2 || rect.h < 2 {
-        return Ok(());
-    }
-
-    let inner_w = rect.w.saturating_sub(2) as usize;
-    let title_text = if title.is_empty() {
-        String::new()
-    } else {
-        format!(" {} ", title)
-    };
-    let title_width = title_text.chars().count();
-    let top_middle = if title_width >= inner_w {
-        truncate_to_width(&title_text, inner_w)
-    } else {
-        format!("{}{}", title_text, "─".repeat(inner_w - title_width))
-    };
-    draw_segment(
-        stdout,
-        rect.x,
-        rect.y,
-        &format!("╭{}╮", top_middle),
-        rect.w,
-        Some(color),
-        Some(COLOR_PANEL_BG),
-        false,
-        true,
-    )?;
-
-    for y in rect.y + 1..rect.y + rect.h.saturating_sub(1) {
-        draw_segment(
-            stdout,
-            rect.x,
-            y,
-            &format!("│{}│", " ".repeat(inner_w)),
-            rect.w,
-            Some(COLOR_MUTED),
-            Some(COLOR_PANEL_BG),
-            false,
-            false,
-        )?;
-    }
-
-    draw_segment(
-        stdout,
-        rect.x,
-        rect.y + rect.h.saturating_sub(1),
-        &format!("╰{}╯", "─".repeat(inner_w)),
-        rect.w,
-        Some(color),
-        Some(COLOR_PANEL_BG),
-        false,
-        true,
-    )
-}
-
-fn draw_panel_line(
-    stdout: &mut Stdout,
-    rect: Rect,
-    row: u16,
-    text: &str,
-    fg: Option<Color>,
-    reverse: bool,
-    bold: bool,
-) -> io::Result<()> {
-    if rect.w <= 2 || rect.h <= 2 || row >= rect.h - 2 {
-        return Ok(());
-    }
-    draw_segment(
-        stdout,
-        rect.x + 1,
-        rect.y + 1 + row,
-        text,
-        rect.w - 2,
-        fg,
-        Some(COLOR_PANEL_BG),
-        reverse,
-        bold,
-    )
-}
-
-fn draw_meter(
-    stdout: &mut Stdout,
-    rect: Rect,
-    row: u16,
-    label: &str,
-    percent: f32,
-    detail: &str,
-) -> io::Result<()> {
-    let inner_w = rect.w.saturating_sub(2) as usize;
-    let fixed_w = label.chars().count() + detail.chars().count() + 13;
-    let bar_w = max(8, inner_w.saturating_sub(fixed_w));
-    let line = format!(
-        "{:<7} {:>5.1}% [{}] {}",
-        label,
-        percent,
-        progress_bar(percent, bar_w),
-        detail
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(theme::panel_block(title_line("CPU", theme::header_style())))
+            .style(theme::panel_style()),
+        area,
     );
-    draw_panel_line(
-        stdout,
-        rect,
-        row,
-        &line,
-        Some(usage_color(percent)),
-        false,
-        false,
-    )
+}
+
+fn render_system_panel(frame: &mut Frame, area: TuiRect, metrics: &RuntimeMetrics) {
+    let inner_width = area.width.saturating_sub(2) as usize;
+    let lines = vec![
+        meter_line(
+            "Memory",
+            metrics.mem_percent,
+            &format!(
+                "{}/{}",
+                human_bytes(metrics.mem_used as f64, 1),
+                human_bytes(metrics.mem_total as f64, 1)
+            ),
+            inner_width,
+        ),
+        meter_line(
+            "Swap",
+            metrics.swap_percent,
+            &format!(
+                "{}/{}",
+                human_bytes(metrics.swap_used as f64, 1),
+                human_bytes(metrics.swap_total as f64, 1)
+            ),
+            inner_width,
+        ),
+        meter_line(
+            "Disk /",
+            metrics.disk_percent,
+            &format!(
+                "{}/{}",
+                human_bytes(metrics.disk_used as f64, 1),
+                human_bytes(metrics.disk_total as f64, 1)
+            ),
+            inner_width,
+        ),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Down ", theme::label_style()),
+            Span::styled(
+                format!("{:>10}/s", human_bytes(metrics.net_rate_down, 1)),
+                theme::usage_style(0.0),
+            ),
+            Span::styled("    Up ", theme::label_style()),
+            Span::styled(
+                format!("{:>10}/s", human_bytes(metrics.net_rate_up, 1)),
+                theme::usage_style(0.0),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Total ↓ ", theme::label_style()),
+            Span::styled(
+                format!("{:>10}", human_bytes(metrics.net_total_down as f64, 1)),
+                theme::muted_style(),
+            ),
+            Span::styled("     ↑ ", theme::label_style()),
+            Span::styled(
+                format!("{:>10}", human_bytes(metrics.net_total_up as f64, 1)),
+                theme::muted_style(),
+            ),
+        ]),
+    ];
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(theme::panel_block(title_line(
+                "Memory • Disk • Net",
+                theme::title_style(),
+            )))
+            .style(theme::panel_style()),
+        area,
+    );
+}
+
+fn render_process_panel(
+    frame: &mut Frame,
+    area: TuiRect,
+    app: &mut AppState,
+    metrics: &RuntimeMetrics,
+) {
+    let sort_label = match app.sort_key {
+        SortKey::Cpu => "CPU",
+        SortKey::Mem => "MEM",
+        SortKey::Power => "PWR*",
+    };
+
+    let mut proc_header = format!(
+        "Processes: {} total | Showing {} by {}",
+        metrics.proc_total,
+        metrics.procs.len(),
+        sort_label
+    );
+    if !app.search_query.is_empty() {
+        proc_header.push_str(&format!(" | /{}", app.search_query));
+    }
+    if let Some(pid) = app.locked_pid {
+        proc_header.push_str(&format!(" | LOCK PID {}", pid));
+    }
+
+    let table_width = area.width.saturating_sub(2) as usize;
+    let table_mode = process_table_mode(table_width);
+    let visible_rows = max(1, area.height.saturating_sub(3) as usize);
+
+    if metrics.procs.is_empty() {
+        app.selected_index = 0;
+    } else {
+        app.selected_index = min(app.selected_index, metrics.procs.len() - 1);
+    }
+
+    if app.selected_index < app.scroll_offset {
+        app.scroll_offset = app.selected_index;
+    } else if app.selected_index >= app.scroll_offset + visible_rows {
+        app.scroll_offset = app.selected_index.saturating_sub(visible_rows - 1);
+    }
+    app.scroll_offset = min(
+        app.scroll_offset,
+        metrics.procs.len().saturating_sub(visible_rows),
+    );
+
+    let end_ix = min(metrics.procs.len(), app.scroll_offset + visible_rows);
+    let visible = &metrics.procs[app.scroll_offset..end_ix];
+    let mut lines = vec![Line::from(Span::styled(
+        process_table_header(table_mode),
+        theme::title_style(),
+    ))];
+
+    for (idx, p) in visible.iter().enumerate() {
+        let absolute_index = app.scroll_offset + idx;
+        lines.push(process_table_line(
+            p,
+            table_mode,
+            table_width,
+            absolute_index == app.selected_index,
+        ));
+    }
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(theme::panel_block(title_line(
+                proc_header,
+                theme::header_style(),
+            )))
+            .style(theme::panel_style()),
+        area,
+    );
+}
+
+fn render_dashboard(frame: &mut Frame, app: &mut AppState, metrics: &RuntimeMetrics) {
+    let area = frame.size();
+    frame.render_widget(Block::default().style(theme::base_style()), area);
+
+    if area.height < 18 || area.width < 72 {
+        frame.render_widget(
+            Paragraph::new("Terminal too small. Resize window (min 72x18). Press q to quit.")
+                .style(theme::base_style().fg(COLOR_RED)),
+            area,
+        );
+        return;
+    }
+
+    let top_h = if area.height >= 30 { 10 } else { 8 };
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(top_h),
+            Constraint::Length(1),
+            Constraint::Min(3),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(area);
+
+    let top_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(80),
+            Constraint::Length(1),
+            Constraint::Percentage(20),
+        ])
+        .split(chunks[1]);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(" SysWatcher ", theme::title_style().bg(COLOR_APP_BG)),
+            Span::styled("• ", theme::muted_style().bg(COLOR_APP_BG)),
+            Span::styled(metrics.host.clone(), theme::header_style().bg(COLOR_APP_BG)),
+            Span::styled(" • ", theme::muted_style().bg(COLOR_APP_BG)),
+            Span::styled(
+                metrics.now_text.clone(),
+                theme::muted_style().bg(COLOR_APP_BG),
+            ),
+        ]))
+        .style(theme::base_style()),
+        chunks[0],
+    );
+
+    render_cpu_panel(frame, top_chunks[0], metrics);
+    render_system_panel(frame, top_chunks[2], metrics);
+    render_process_panel(frame, chunks[3], app, metrics);
+
+    let mut bottom = String::new();
+    if app.search_mode {
+        bottom = format!("Search   : {}", app.search_input);
+    } else if !app.search_query.is_empty() {
+        bottom = format!(
+            "Filter   : {}  (press '/' to edit, Enter on empty to clear)",
+            app.search_query
+        );
+    } else if !app.status_message.is_empty() && Instant::now() < app.status_until {
+        bottom = format!("Status   : {}", app.status_message);
+    }
+    frame.render_widget(
+        Paragraph::new(bottom).style(theme::status_style()),
+        chunks[4],
+    );
+
+    let visible_rows = max(1, chunks[3].height.saturating_sub(3) as usize);
+    let max_scroll = metrics.procs.len().saturating_sub(visible_rows);
+    let mut help =
+        "q:quit  /:search  Enter:lock/unlock  ↑/↓ or j/k:move  PgUp/PgDn:page  Home/End  x:kill  c/m/p:sort  r:refresh"
+            .to_string();
+    if max_scroll > 0 {
+        let pos = min(metrics.procs.len(), app.scroll_offset + 1);
+        let end = min(metrics.procs.len(), app.scroll_offset + visible_rows);
+        help.push_str(&format!("  [{}-{}/{}]", pos, end, metrics.procs.len()));
+    }
+    frame.render_widget(
+        Paragraph::new(help)
+            .style(theme::panel_style())
+            .wrap(Wrap { trim: true }),
+        chunks[5],
+    );
+
+    if app.search_mode {
+        let cursor_x = min(
+            chunks[4].right().saturating_sub(1),
+            chunks[4].x + ("Search   : ".chars().count() + app.search_input.chars().count()) as u16,
+        );
+        frame.set_cursor(cursor_x, chunks[4].y);
+    }
 }
 
 fn sample_disk_usage() -> (u64, u64) {
@@ -997,6 +1231,9 @@ fn run_app(refresh_rate: f64, top: usize) -> io::Result<()> {
     let mut stdout = stdout();
     execute!(stdout, EnterAlternateScreen, Hide)?;
     terminal::enable_raw_mode()?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+    terminal.clear()?;
 
     let mut system = System::new_all();
     system.refresh_all();
@@ -1022,127 +1259,136 @@ fn run_app(refresh_rate: f64, top: usize) -> io::Result<()> {
     );
 
     let mut last_sample = Instant::now();
+    let mut needs_draw = true;
 
     loop {
-        if event::poll(Duration::from_millis(UI_POLL_MS))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind != KeyEventKind::Press {
-                    continue;
-                }
+        let status_was_visible =
+            !app.status_message.is_empty() && Instant::now() < app.status_until;
 
-                if app.search_mode {
-                    match key.code {
-                        KeyCode::Esc => {
-                            app.search_mode = false;
-                            app.search_input.clear();
-                        }
-                        KeyCode::Enter => {
-                            app.search_query = app.search_input.trim().to_string();
-                            app.search_mode = false;
-                            app.search_input.clear();
-                            app.selected_index = 0;
-                            app.scroll_offset = 0;
-                            app.force_refresh = true;
-                        }
-                        KeyCode::Backspace => {
-                            app.search_input.pop();
-                        }
-                        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            app.search_input.clear();
-                        }
-                        KeyCode::Char(c) => {
-                            if !key
-                                .modifiers
-                                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-                            {
-                                app.search_input.push(c);
-                            }
-                        }
-                        _ => {}
+        if event::poll(Duration::from_millis(UI_POLL_MS))? {
+            match event::read()? {
+                Event::Key(key) => {
+                    if key.kind != KeyEventKind::Press {
+                        continue;
                     }
-                } else {
-                    match key.code {
-                        KeyCode::Char('q') | KeyCode::Char('Q') => break,
-                        KeyCode::Char('/') => {
-                            app.search_mode = true;
-                            app.search_input = app.search_query.clone();
-                        }
-                        KeyCode::Char('c') | KeyCode::Char('C') => {
-                            app.sort_key = SortKey::Cpu;
-                            app.scroll_offset = 0;
-                            app.force_refresh = true;
-                        }
-                        KeyCode::Char('m') | KeyCode::Char('M') => {
-                            app.sort_key = SortKey::Mem;
-                            app.scroll_offset = 0;
-                            app.force_refresh = true;
-                        }
-                        KeyCode::Char('p') | KeyCode::Char('P') => {
-                            app.sort_key = SortKey::Power;
-                            app.scroll_offset = 0;
-                            app.force_refresh = true;
-                        }
-                        KeyCode::Char('r') | KeyCode::Char('R') => app.force_refresh = true,
-                        KeyCode::Enter => {
-                            if metrics.procs.is_empty() {
-                                app.status_message = "No process to lock".to_string();
-                                app.status_until = Instant::now() + Duration::from_secs(2);
-                            } else {
-                                app.selected_index =
-                                    min(app.selected_index, metrics.procs.len() - 1);
-                                let sel_pid = metrics.procs[app.selected_index].pid;
-                                if app.locked_pid == Some(sel_pid) {
-                                    app.locked_pid = None;
-                                    app.status_message = "Selection unlocked".to_string();
-                                } else {
-                                    app.locked_pid = Some(sel_pid);
-                                    app.status_message = format!("Locked on PID {}", sel_pid);
-                                }
-                                app.status_until = Instant::now() + Duration::from_secs(2);
+
+                    if app.search_mode {
+                        match key.code {
+                            KeyCode::Esc => {
+                                app.search_mode = false;
+                                app.search_input.clear();
                             }
-                        }
-                        KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J')
-                            if app.locked_pid.is_none() =>
-                        {
-                            app.selected_index = app.selected_index.saturating_add(1);
-                        }
-                        KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K')
-                            if app.locked_pid.is_none() =>
-                        {
-                            app.selected_index = app.selected_index.saturating_sub(1);
-                        }
-                        KeyCode::PageDown if app.locked_pid.is_none() => {
-                            app.selected_index = app.selected_index.saturating_add(20);
-                        }
-                        KeyCode::PageUp if app.locked_pid.is_none() => {
-                            app.selected_index = app.selected_index.saturating_sub(20);
-                        }
-                        KeyCode::Home if app.locked_pid.is_none() => app.selected_index = 0,
-                        KeyCode::End if app.locked_pid.is_none() => {
-                            app.selected_index = usize::MAX / 2
-                        }
-                        KeyCode::Char('X') | KeyCode::Char('x') => {
-                            if metrics.procs.is_empty() {
-                                app.status_message = "No process selected".to_string();
-                                app.status_until = Instant::now() + Duration::from_secs(2);
-                            } else {
-                                app.selected_index =
-                                    min(app.selected_index, metrics.procs.len() - 1);
-                                let pid = metrics.procs[app.selected_index].pid;
-                                let (ok, msg) = kill_process_tree(pid);
-                                app.status_message = msg;
-                                app.status_until = Instant::now()
-                                    + if ok {
-                                        Duration::from_secs(2)
-                                    } else {
-                                        Duration::from_millis(2800)
-                                    };
+                            KeyCode::Enter => {
+                                app.search_query = app.search_input.trim().to_string();
+                                app.search_mode = false;
+                                app.search_input.clear();
+                                app.selected_index = 0;
+                                app.scroll_offset = 0;
                                 app.force_refresh = true;
                             }
+                            KeyCode::Backspace => {
+                                app.search_input.pop();
+                            }
+                            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                app.search_input.clear();
+                            }
+                            KeyCode::Char(c) => {
+                                if !key
+                                    .modifiers
+                                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                                {
+                                    app.search_input.push(c);
+                                }
+                            }
+                            _ => {}
                         }
-                        _ => {}
+                    } else {
+                        match key.code {
+                            KeyCode::Char('q') | KeyCode::Char('Q') => break,
+                            KeyCode::Char('/') => {
+                                app.search_mode = true;
+                                app.search_input = app.search_query.clone();
+                            }
+                            KeyCode::Char('c') | KeyCode::Char('C') => {
+                                app.sort_key = SortKey::Cpu;
+                                app.scroll_offset = 0;
+                                app.force_refresh = true;
+                            }
+                            KeyCode::Char('m') | KeyCode::Char('M') => {
+                                app.sort_key = SortKey::Mem;
+                                app.scroll_offset = 0;
+                                app.force_refresh = true;
+                            }
+                            KeyCode::Char('p') | KeyCode::Char('P') => {
+                                app.sort_key = SortKey::Power;
+                                app.scroll_offset = 0;
+                                app.force_refresh = true;
+                            }
+                            KeyCode::Char('r') | KeyCode::Char('R') => app.force_refresh = true,
+                            KeyCode::Enter => {
+                                if metrics.procs.is_empty() {
+                                    app.status_message = "No process to lock".to_string();
+                                    app.status_until = Instant::now() + Duration::from_secs(2);
+                                } else {
+                                    app.selected_index =
+                                        min(app.selected_index, metrics.procs.len() - 1);
+                                    let sel_pid = metrics.procs[app.selected_index].pid;
+                                    if app.locked_pid == Some(sel_pid) {
+                                        app.locked_pid = None;
+                                        app.status_message = "Selection unlocked".to_string();
+                                    } else {
+                                        app.locked_pid = Some(sel_pid);
+                                        app.status_message = format!("Locked on PID {}", sel_pid);
+                                    }
+                                    app.status_until = Instant::now() + Duration::from_secs(2);
+                                }
+                            }
+                            KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J')
+                                if app.locked_pid.is_none() =>
+                            {
+                                app.selected_index = app.selected_index.saturating_add(1);
+                            }
+                            KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K')
+                                if app.locked_pid.is_none() =>
+                            {
+                                app.selected_index = app.selected_index.saturating_sub(1);
+                            }
+                            KeyCode::PageDown if app.locked_pid.is_none() => {
+                                app.selected_index = app.selected_index.saturating_add(20);
+                            }
+                            KeyCode::PageUp if app.locked_pid.is_none() => {
+                                app.selected_index = app.selected_index.saturating_sub(20);
+                            }
+                            KeyCode::Home if app.locked_pid.is_none() => app.selected_index = 0,
+                            KeyCode::End if app.locked_pid.is_none() => {
+                                app.selected_index = usize::MAX / 2
+                            }
+                            KeyCode::Char('X') | KeyCode::Char('x') => {
+                                if metrics.procs.is_empty() {
+                                    app.status_message = "No process selected".to_string();
+                                    app.status_until = Instant::now() + Duration::from_secs(2);
+                                } else {
+                                    app.selected_index =
+                                        min(app.selected_index, metrics.procs.len() - 1);
+                                    let pid = metrics.procs[app.selected_index].pid;
+                                    let (ok, msg) = kill_process_tree(pid);
+                                    app.status_message = msg;
+                                    app.status_until = Instant::now()
+                                        + if ok {
+                                            Duration::from_secs(2)
+                                        } else {
+                                            Duration::from_millis(2800)
+                                        };
+                                    app.force_refresh = true;
+                                }
+                            }
+                            _ => {}
+                        }
                     }
+                    needs_draw = true;
                 }
+                Event::Resize(_, _) => needs_draw = true,
+                _ => {}
             }
         }
 
@@ -1173,329 +1419,23 @@ fn run_app(refresh_rate: f64, top: usize) -> io::Result<()> {
 
             app.force_refresh = false;
             last_sample = Instant::now();
+            needs_draw = true;
         }
 
-        let (w, h) = terminal::size()?;
-        queue!(stdout, MoveTo(0, 0), Clear(ClearType::All))?;
-
-        if h < 18 || w < 72 {
-            draw_segment(
-                &mut stdout,
-                0,
-                0,
-                "Terminal too small. Resize window (min 72x18). Press q to quit.",
-                w,
-                Some(COLOR_RED),
-                Some(COLOR_APP_BG),
-                false,
-                false,
-            )?;
-            stdout.flush()?;
-            continue;
+        let status_is_visible = !app.status_message.is_empty() && Instant::now() < app.status_until;
+        if status_was_visible && !status_is_visible {
+            needs_draw = true;
         }
 
-        for y in 0..h {
-            draw_segment(
-                &mut stdout,
-                0,
-                y,
-                "",
-                w,
-                Some(COLOR_TEXT),
-                Some(COLOR_APP_BG),
-                false,
-                false,
-            )?;
-        }
-
-        let top_h = if h >= 30 { 10 } else { 8 };
-        let proc_y = 1 + top_h;
-        let proc_h = h.saturating_sub(proc_y + 2);
-        let left_w = if w >= 118 {
-            max(46, (w as usize * 48 / 100) as u16)
-        } else {
-            max(36, w / 2)
-        };
-        let right_w = w.saturating_sub(left_w);
-        let cpu_rect = Rect {
-            x: 0,
-            y: 1,
-            w: left_w,
-            h: top_h,
-        };
-        let sys_rect = Rect {
-            x: left_w,
-            y: 1,
-            w: right_w,
-            h: top_h,
-        };
-        let proc_rect = Rect {
-            x: 0,
-            y: proc_y,
-            w,
-            h: proc_h,
-        };
-
-        draw_segment(
-            &mut stdout,
-            0,
-            0,
-            &format!(" SysWatcher • {} • {} ", metrics.host, metrics.now_text),
-            w,
-            Some(COLOR_APP_BG),
-            Some(COLOR_CYAN),
-            false,
-            true,
-        )?;
-
-        draw_box(&mut stdout, cpu_rect, "CPU", COLOR_CYAN)?;
-        draw_meter(
-            &mut stdout,
-            cpu_rect,
-            0,
-            "Total",
-            metrics.cpu_total,
-            &format!(
-                "load {:.2} {:.2} {:.2}",
-                metrics.load_1, metrics.load_5, metrics.load_15
-            ),
-        )?;
-        draw_panel_line(
-            &mut stdout,
-            cpu_rect,
-            1,
-            &format!("Uptime  {}", metrics.uptime_text),
-            Some(COLOR_MUTED),
-            false,
-            false,
-        )?;
-        let core_inner = cpu_rect.w.saturating_sub(2) as usize;
-        let core_cols = if core_inner >= 50 { 2 } else { 1 };
-        let core_col_w = max(18, core_inner / core_cols);
-        let core_bar_w = max(4, core_col_w.saturating_sub(11));
-        for (idx, cpu) in metrics.cpu_per_core.iter().enumerate() {
-            let row = 2 + (idx / core_cols) as u16;
-            if row >= cpu_rect.h.saturating_sub(2) {
-                break;
+        if needs_draw {
+            terminal.draw(|frame| render_dashboard(frame, &mut app, &metrics))?;
+            if app.search_mode {
+                terminal.show_cursor()?;
+            } else {
+                terminal.hide_cursor()?;
             }
-            let col = idx % core_cols;
-            let core_line = format!(
-                "C{:02} {:>3.0}% {}",
-                idx,
-                cpu,
-                progress_bar(*cpu, core_bar_w)
-            );
-            draw_segment(
-                &mut stdout,
-                cpu_rect.x + 1 + (col * core_col_w) as u16,
-                cpu_rect.y + 1 + row,
-                &core_line,
-                min(core_col_w, core_inner.saturating_sub(col * core_col_w)) as u16,
-                Some(usage_color(*cpu)),
-                Some(COLOR_PANEL_BG),
-                false,
-                false,
-            )?;
+            needs_draw = false;
         }
-
-        draw_box(&mut stdout, sys_rect, "Memory • Disk • Net", COLOR_PURPLE)?;
-        draw_meter(
-            &mut stdout,
-            sys_rect,
-            0,
-            "Memory",
-            metrics.mem_percent,
-            &format!(
-                "{}/{}",
-                human_bytes(metrics.mem_used as f64, 1),
-                human_bytes(metrics.mem_total as f64, 1)
-            ),
-        )?;
-        draw_meter(
-            &mut stdout,
-            sys_rect,
-            1,
-            "Swap",
-            metrics.swap_percent,
-            &format!(
-                "{}/{}",
-                human_bytes(metrics.swap_used as f64, 1),
-                human_bytes(metrics.swap_total as f64, 1)
-            ),
-        )?;
-        draw_meter(
-            &mut stdout,
-            sys_rect,
-            2,
-            "Disk /",
-            metrics.disk_percent,
-            &format!(
-                "{}/{}",
-                human_bytes(metrics.disk_used as f64, 1),
-                human_bytes(metrics.disk_total as f64, 1)
-            ),
-        )?;
-        draw_panel_line(
-            &mut stdout,
-            sys_rect,
-            4,
-            &format!(
-                "Down    {:>10}/s    Up {:>10}/s",
-                human_bytes(metrics.net_rate_down, 1),
-                human_bytes(metrics.net_rate_up, 1)
-            ),
-            Some(COLOR_GREEN),
-            false,
-            false,
-        )?;
-        draw_panel_line(
-            &mut stdout,
-            sys_rect,
-            5,
-            &format!(
-                "Total ↓ {:>10}     ↑ {:>10}",
-                human_bytes(metrics.net_total_down as f64, 1),
-                human_bytes(metrics.net_total_up as f64, 1)
-            ),
-            Some(COLOR_MUTED),
-            false,
-            false,
-        )?;
-
-        let sort_label = match app.sort_key {
-            SortKey::Cpu => "CPU",
-            SortKey::Mem => "MEM",
-            SortKey::Power => "PWR*",
-        };
-
-        let mut proc_header = format!(
-            "Processes: {} total | Showing {} by {}",
-            metrics.proc_total,
-            metrics.procs.len(),
-            sort_label
-        );
-        if !app.search_query.is_empty() {
-            proc_header.push_str(&format!(" | /{}", app.search_query));
-        }
-        if let Some(pid) = app.locked_pid {
-            proc_header.push_str(&format!(" | LOCK PID {}", pid));
-        }
-        draw_box(&mut stdout, proc_rect, &proc_header, COLOR_CYAN)?;
-        let table_width = proc_rect.w.saturating_sub(2) as usize;
-        let table_mode = process_table_mode(table_width);
-        let table_header = process_table_header(table_mode);
-        draw_panel_line(
-            &mut stdout,
-            proc_rect,
-            0,
-            &table_header,
-            Some(COLOR_PURPLE),
-            false,
-            true,
-        )?;
-
-        if metrics.procs.is_empty() {
-            app.selected_index = 0;
-        } else {
-            app.selected_index = min(app.selected_index, metrics.procs.len() - 1);
-        }
-
-        let visible_rows = max(1, proc_rect.h.saturating_sub(3) as usize);
-        if app.selected_index < app.scroll_offset {
-            app.scroll_offset = app.selected_index;
-        } else if app.selected_index >= app.scroll_offset + visible_rows {
-            app.scroll_offset = app.selected_index.saturating_sub(visible_rows - 1);
-        }
-
-        let max_scroll = metrics.procs.len().saturating_sub(visible_rows);
-        app.scroll_offset = min(app.scroll_offset, max_scroll);
-
-        let end_ix = min(metrics.procs.len(), app.scroll_offset + visible_rows);
-        let visible = &metrics.procs[app.scroll_offset..end_ix];
-
-        for (idx, p) in visible.iter().enumerate() {
-            let absolute_index = app.scroll_offset + idx;
-            let line = process_table_row(p, table_mode, table_width);
-            let selected = absolute_index == app.selected_index;
-            draw_segment(
-                &mut stdout,
-                proc_rect.x + 1,
-                proc_rect.y + 2 + idx as u16,
-                &line,
-                proc_rect.w.saturating_sub(2),
-                if selected {
-                    Some(Color::White)
-                } else {
-                    Some(COLOR_TEXT)
-                },
-                if selected {
-                    Some(COLOR_SELECT_BG)
-                } else {
-                    Some(COLOR_PANEL_BG)
-                },
-                false,
-                selected,
-            )?;
-        }
-
-        let mut bottom = String::new();
-        if app.search_mode {
-            bottom = format!("Search   : {}", app.search_input);
-        } else if !app.search_query.is_empty() {
-            bottom = format!(
-                "Filter   : {}  (press '/' to edit, Enter on empty to clear)",
-                app.search_query
-            );
-        } else if !app.status_message.is_empty() && Instant::now() < app.status_until {
-            bottom = format!("Status   : {}", app.status_message);
-        }
-        draw_segment(
-            &mut stdout,
-            0,
-            h - 2,
-            &bottom,
-            w,
-            Some(COLOR_YELLOW),
-            Some(COLOR_APP_BG),
-            false,
-            false,
-        )?;
-
-        let mut help =
-            "q:quit  /:search  Enter:lock/unlock  ↑/↓ or j/k:move  PgUp/PgDn:page  Home/End  x:kill  c/m/p:sort  r:refresh".to_string();
-        if max_scroll > 0 {
-            let pos = min(metrics.procs.len(), app.scroll_offset + 1);
-            let end = min(metrics.procs.len(), app.scroll_offset + visible.len());
-            help.push_str(&format!("  [{}-{}/{}]", pos, end, metrics.procs.len()));
-        }
-        draw_segment(
-            &mut stdout,
-            0,
-            h - 1,
-            &help,
-            w,
-            Some(COLOR_TEXT),
-            Some(COLOR_PANEL_BG),
-            false,
-            false,
-        )?;
-
-        if app.search_mode {
-            let cursor_x = min(
-                w.saturating_sub(1),
-                ("Search   : ".chars().count() + app.search_input.chars().count()) as u16,
-            );
-            queue!(
-                stdout,
-                Show,
-                SetCursorStyle::BlinkingBlock,
-                MoveTo(cursor_x, h - 2)
-            )?;
-        } else {
-            queue!(stdout, Hide)?;
-        }
-
-        stdout.flush()?;
     }
 
     Ok(())

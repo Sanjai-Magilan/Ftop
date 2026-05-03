@@ -2,6 +2,14 @@
 
 All notable changes in this project from the beginning.
 
+## 2026-05-03
+
+- Updated the terminal UI color palette with a softer dark theme and clearer accent colors.
+- Fixed system meter bar alignment so Memory, Swap, and Disk bars end consistently.
+- Migrated the terminal UI rendering layer to `ratatui` styles for a modern, minimal dashboard theme.
+- Reduced dependency bloat by disabling `sysinfo`'s default multithreaded `rayon` feature.
+- Reduced runtime overhead by redrawing the dashboard only when input, resize, status, or metrics change.
+
 ## 2026-05-02
 
 - Added per-process runtime (uptime) to the process table.
