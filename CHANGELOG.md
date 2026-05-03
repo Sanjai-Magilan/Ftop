@@ -9,6 +9,10 @@ All notable changes in this project from the beginning.
 - Migrated the terminal UI rendering layer to `ratatui` styles for a modern, minimal dashboard theme.
 - Reduced dependency bloat by disabling `sysinfo`'s default multithreaded `rayon` feature.
 - Reduced runtime overhead by redrawing the dashboard only when input, resize, status, or metrics change.
+- Fixed CPU core display to show all available cores by dynamically sizing the CPU grid (up to 4 columns wide).
+- Improved CPU panel layout to display cores in a clear 4×4 grid order: 0-3, 4-7, 8-11, 12-15.
+- Adjusted top panel width allocation to give more space to the CPU section (80%) vs Memory/Disk/Net (20%).
+- Made CPU section dimensions configurable: height (`top_h` on line 951), width (`Constraint::Percentage` on line 966), and progress bar size (line 643 `core_line` and line 28 `METER_STATIC_WIDTH`).
 
 ## 2026-05-02
 
