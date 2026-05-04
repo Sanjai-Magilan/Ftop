@@ -1215,7 +1215,8 @@ fn render_dashboard(frame: &mut Frame, app: &mut AppState, metrics: &RuntimeMetr
             Block::default()
                 .style(theme::panel_style())
                 .borders(Borders::ALL)
-                .border_type(BorderType::Rounded),
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(COLOR_RED)),
             popup_rect,
         );
 
@@ -1246,6 +1247,7 @@ fn render_dashboard(frame: &mut Frame, app: &mut AppState, metrics: &RuntimeMetr
                         .borders(Borders::ALL)
                         .border_type(BorderType::Rounded)
                         .title("Confirm")
+                        .border_style(Style::default().fg(COLOR_RED))
                         .style(theme::panel_style()),
                 )
                 .style(theme::panel_style()),
