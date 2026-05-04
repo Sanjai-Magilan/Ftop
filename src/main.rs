@@ -10,7 +10,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use std::cmp::{max, min};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::io::{self, stdout};
@@ -109,6 +109,7 @@ enum ProcessTableMode {
 
 struct ProcRow {
     pid: i32,
+    parent_pid: Option<i32>,
     cpu_percent: f32,
     mem_percent: f32,
     power_watts: Option<f32>,
@@ -118,6 +119,8 @@ struct ProcRow {
     resident_bytes: u64,
     priority: i64,
     name: String,
+    tree_prefix: String,
+    tree_marker: String,
 }
 
 struct MemInfo {
@@ -161,6 +164,7 @@ struct AppState {
     scroll_offset: usize,
     selected_index: usize,
     locked_pid: Option<i32>,
+    tree_view: bool,
     search_mode: bool,
     search_query: String,
     search_input: String,
@@ -178,6 +182,7 @@ impl Default for AppState {
             scroll_offset: 0,
             selected_index: 0,
             locked_pid: None,
+            tree_view: false,
             search_mode: false,
             search_query: String::new(),
             search_input: String::new(),
@@ -472,6 +477,134 @@ fn filter_processes(mut procs: Vec<ProcRow>, query: &str) -> Vec<ProcRow> {
     procs
 }
 
+fn compare_process_rows(a: &ProcRow, b: &ProcRow, sort_key: SortKey) -> std::cmp::Ordering {
+    let ord = match sort_key {
+        SortKey::Cpu => b
+            .cpu_percent
+            .partial_cmp(&a.cpu_percent)
+            .unwrap_or(std::cmp::Ordering::Equal),
+        SortKey::Mem => b
+            .mem_percent
+            .partial_cmp(&a.mem_percent)
+            .unwrap_or(std::cmp::Ordering::Equal),
+        SortKey::Power => b
+            .power_watts
+            .unwrap_or(0.0)
+            .partial_cmp(&a.power_watts.unwrap_or(0.0))
+            .unwrap_or(std::cmp::Ordering::Equal),
+    };
+
+    ord.then_with(|| a.pid.cmp(&b.pid))
+}
+
+fn visit_tree_rows(
+    pid: i32,
+    prefix: String,
+    marker: String,
+    by_pid: &mut HashMap<i32, ProcRow>,
+    children: &HashMap<i32, Vec<i32>>,
+    sort_key: SortKey,
+    visited: &mut HashSet<i32>,
+    out: &mut Vec<ProcRow>,
+) {
+    if !visited.insert(pid) {
+        return;
+    }
+
+    let Some(mut row) = by_pid.remove(&pid) else {
+        return;
+    };
+
+    row.tree_prefix = prefix.clone();
+    row.tree_marker = marker.clone();
+    out.push(row);
+
+    let next_prefix = if marker.is_empty() {
+        prefix
+    } else if marker == "└─ " {
+        format!("{}   ", prefix)
+    } else {
+        format!("{}│  ", prefix)
+    };
+
+    let mut child_pids = children.get(&pid).cloned().unwrap_or_default();
+    child_pids.sort_by(|left, right| {
+        let Some(left_row) = by_pid.get(left) else {
+            return std::cmp::Ordering::Equal;
+        };
+        let Some(right_row) = by_pid.get(right) else {
+            return std::cmp::Ordering::Equal;
+        };
+        compare_process_rows(left_row, right_row, sort_key)
+    });
+
+    let last_index = child_pids.len().saturating_sub(1);
+    for (index, child_pid) in child_pids.into_iter().enumerate() {
+        let child_marker = if index == last_index { "└─ " } else { "├─ " };
+        visit_tree_rows(
+            child_pid,
+            next_prefix.clone(),
+            child_marker.to_string(),
+            by_pid,
+            children,
+            sort_key,
+            visited,
+            out,
+        );
+    }
+}
+
+fn build_tree_rows(rows: Vec<ProcRow>, sort_key: SortKey) -> Vec<ProcRow> {
+    let mut by_pid = rows.into_iter().map(|row| (row.pid, row)).collect::<HashMap<_, _>>();
+    let mut children: HashMap<i32, Vec<i32>> = HashMap::new();
+    let mut roots = Vec::new();
+
+    for (&pid, row) in &by_pid {
+        match row.parent_pid {
+            Some(parent_pid) if parent_pid != pid && by_pid.contains_key(&parent_pid) => {
+                children.entry(parent_pid).or_default().push(pid);
+            }
+            _ => roots.push(pid),
+        }
+    }
+
+    roots.sort_by(|left, right| {
+        let Some(left_row) = by_pid.get(left) else {
+            return std::cmp::Ordering::Equal;
+        };
+        let Some(right_row) = by_pid.get(right) else {
+            return std::cmp::Ordering::Equal;
+        };
+        compare_process_rows(left_row, right_row, sort_key)
+    });
+
+    let mut visited = HashSet::new();
+    let mut out = Vec::new();
+    let last_index = roots.len().saturating_sub(1);
+
+    for (index, pid) in roots.into_iter().enumerate() {
+        let marker = if index == last_index { "" } else { "" };
+        visit_tree_rows(
+            pid,
+            String::new(),
+            marker.to_string(),
+            &mut by_pid,
+            &children,
+            sort_key,
+            &mut visited,
+            &mut out,
+        );
+    }
+
+    if !by_pid.is_empty() {
+        let mut leftovers = by_pid.into_values().collect::<Vec<_>>();
+        leftovers.sort_by(|left, right| compare_process_rows(left, right, sort_key));
+        out.extend(leftovers);
+    }
+
+    out
+}
+
 fn read_ppid_map() -> HashMap<i32, Vec<i32>> {
     let mut map: HashMap<i32, Vec<i32>> = HashMap::new();
 
@@ -668,9 +801,15 @@ fn process_table_line(
     mode: ProcessTableMode,
     width: usize,
     selected: bool,
+    tree_view: bool,
 ) -> Line<'static> {
     let fixed_width = process_table_fixed_width(mode);
-    let name_w = width.saturating_sub(fixed_width).max(1);
+    let tree_prefix = if tree_view {
+        format!("{}{}", p.tree_prefix, p.tree_marker)
+    } else {
+        String::new()
+    };
+    let name_w = width.saturating_sub(fixed_width + tree_prefix.chars().count()).max(1);
     let name = truncate_to_width(&p.name, name_w);
 
     match mode {
@@ -689,13 +828,14 @@ fn process_table_line(
             ),
             text_span(
                 format!(
-                    "  {:>4}  {:>11} {:>8} {:>9} {:>8}  {:>6}  {}",
+                    "  {:>4}  {:>11} {:>8} {:>9} {:>8}  {:>6}  {}{}",
                     p.priority,
                     human_uptime(p.uptime_secs),
                     format_process_memory(p.shared_bytes, 8),
                     format_process_memory(p.virtual_bytes, 9),
                     format_process_memory(p.resident_bytes, 8),
                     format_power_usage(p.power_watts),
+                    tree_prefix,
                     name
                 ),
                 theme::label_style(),
@@ -717,11 +857,12 @@ fn process_table_line(
             ),
             text_span(
                 format!(
-                    "  {:>8} {:>9} {:>8}  {:>6}  {}",
+                    "  {:>8} {:>9} {:>8}  {:>6}  {}{}",
                     format_process_memory(p.shared_bytes, 8),
                     format_process_memory(p.virtual_bytes, 9),
                     format_process_memory(p.resident_bytes, 8),
                     format_power_usage(p.power_watts),
+                    tree_prefix,
                     name
                 ),
                 theme::label_style(),
@@ -743,8 +884,9 @@ fn process_table_line(
             ),
             text_span(
                 format!(
-                    "  {:>8}  {}",
+                    "  {:>8}  {}{}",
                     format_process_memory(p.resident_bytes, 8),
+                    tree_prefix,
                     name
                 ),
                 theme::label_style(),
@@ -879,12 +1021,14 @@ fn render_process_panel(
         SortKey::Mem => "MEM",
         SortKey::Power => "PWR*",
     };
+    let view_label = if app.tree_view { "TREE" } else { "FLAT" };
 
     let mut proc_header = format!(
-        "Processes: {} total | Showing {} by {}",
+        "Processes: {} total | Showing {} by {} | {}",
         metrics.proc_total,
         metrics.procs.len(),
-        sort_label
+        sort_label,
+        view_label
     );
     if !app.search_query.is_empty() {
         proc_header.push_str(&format!(" | /{}", app.search_query));
@@ -927,6 +1071,7 @@ fn render_process_panel(
             table_mode,
             table_width,
             absolute_index == app.selected_index,
+            app.tree_view,
         ));
     }
 
@@ -1018,7 +1163,7 @@ fn render_dashboard(frame: &mut Frame, app: &mut AppState, metrics: &RuntimeMetr
     let visible_rows = max(1, chunks[3].height.saturating_sub(3) as usize);
     let max_scroll = metrics.procs.len().saturating_sub(visible_rows);
     let mut help =
-        "q:quit  /:search  Enter:lock/unlock  ↑/↓ or j/k:move  PgUp/PgDn:page  Home/End  x:kill  c/m/p:sort  r:refresh"
+        "q:quit  /:search  t:tree  Enter:lock/unlock  ↑/↓ or j/k:move  PgUp/PgDn:page  Home/End  x:kill  c/m/p:sort  r:refresh"
             .to_string();
     if max_scroll > 0 {
         let pos = min(metrics.procs.len(), app.scroll_offset + 1);
@@ -1078,7 +1223,6 @@ fn build_processes(
     system: &System,
     sort_key: SortKey,
     logical_cpus: usize,
-    top: usize,
 ) -> (Vec<ProcRow>, usize) {
     let total_mem_bytes = system.total_memory().max(1);
     let page_size = page_size_bytes();
@@ -1093,6 +1237,7 @@ fn build_processes(
         let mem_pct = (proc_.memory() as f64 / total_mem_bytes as f64 * 100.0) as f32;
         let power = estimate_process_power_watts(cpu, logical_cpus);
         let pid_i32 = pid.as_u32() as i32;
+        let parent_pid = proc_.parent().map(|parent| parent.as_u32() as i32);
         let resident_bytes = proc_.memory();
         let virtual_bytes = proc_.virtual_memory();
         let shared_bytes = read_shared_bytes(pid_i32, page_size);
@@ -1100,6 +1245,7 @@ fn build_processes(
 
         rows.push(ProcRow {
             pid: pid_i32,
+            parent_pid,
             cpu_percent: cpu,
             mem_percent: mem_pct,
             power_watts: power,
@@ -1109,40 +1255,22 @@ fn build_processes(
             resident_bytes,
             priority,
             name: proc_.name().to_string(),
+            tree_prefix: String::new(),
+            tree_marker: String::new(),
         });
     }
 
-    match sort_key {
-        SortKey::Cpu => rows.sort_by(|a, b| {
-            b.cpu_percent
-                .partial_cmp(&a.cpu_percent)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        }),
-        SortKey::Mem => rows.sort_by(|a, b| {
-            b.mem_percent
-                .partial_cmp(&a.mem_percent)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        }),
-        SortKey::Power => rows.sort_by(|a, b| {
-            b.power_watts
-                .unwrap_or(0.0)
-                .partial_cmp(&a.power_watts.unwrap_or(0.0))
-                .unwrap_or(std::cmp::Ordering::Equal)
-        }),
-    }
+    rows.sort_by(|a, b| compare_process_rows(a, b, sort_key));
 
     let total = rows.len();
-    if top == 0 {
-        (rows, total)
-    } else {
-        (rows.into_iter().take(top).collect(), total)
-    }
+    (rows, total)
 }
 
 fn sample_metrics(
     system: &mut System,
     sort_key: SortKey,
     search_query: &str,
+    tree_view: bool,
     top: usize,
     logical_cpus: usize,
     prev_net: &mut (u64, u64),
@@ -1207,8 +1335,16 @@ fn sample_metrics(
     *prev_net = (rx, tx);
     *prev_time = now;
 
-    let (sampled, proc_total) = build_processes(system, sort_key, logical_cpus, top);
-    let filtered = filter_processes(sampled, search_query);
+    let (sampled, proc_total) = build_processes(system, sort_key, logical_cpus);
+    let ordered = if tree_view {
+        build_tree_rows(sampled, sort_key)
+    } else {
+        sampled
+    };
+    let mut filtered = filter_processes(ordered, search_query);
+    if top > 0 {
+        filtered.truncate(top);
+    }
 
     RuntimeMetrics {
         now_text,
@@ -1260,6 +1396,7 @@ fn run_app(refresh_rate: f64, top: usize) -> io::Result<()> {
         &mut system,
         app.sort_key,
         &app.search_query,
+        app.tree_view,
         top,
         logical_cpus,
         &mut prev_net,
@@ -1318,6 +1455,12 @@ fn run_app(refresh_rate: f64, top: usize) -> io::Result<()> {
                             KeyCode::Char('/') => {
                                 app.search_mode = true;
                                 app.search_input = app.search_query.clone();
+                            }
+                            KeyCode::Char('t') | KeyCode::Char('T') => {
+                                app.tree_view = !app.tree_view;
+                                app.selected_index = 0;
+                                app.scroll_offset = 0;
+                                app.force_refresh = true;
                             }
                             KeyCode::Char('c') | KeyCode::Char('C') => {
                                 app.sort_key = SortKey::Cpu;
@@ -1408,6 +1551,7 @@ fn run_app(refresh_rate: f64, top: usize) -> io::Result<()> {
                 &mut system,
                 app.sort_key,
                 &app.search_query,
+                app.tree_view,
                 top,
                 logical_cpus,
                 &mut prev_net,

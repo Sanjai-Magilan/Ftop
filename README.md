@@ -44,6 +44,7 @@ cargo run --release -- --refresh 0.5 --top 20
 
 - `q` → Quit
 - `/` → Search/filter processes by name or PID
+- `t` → Toggle process tree view
 - `Enter` → Lock/unlock selection on the highlighted process
 - `↑/↓` or `j/k` → Move selection
 - `PgUp/PgDn` → Page up/down
@@ -53,6 +54,12 @@ cargo run --release -- --refresh 0.5 --top 20
 - `m` → Sort process list by memory
 - `p` → Sort process list by power consumption
 - `r` → Refresh immediately
+
+### Process tree view
+
+- Press `t` to switch the process panel between a flat list and a parent/child tree.
+- Tree mode keeps the same sort key for sibling ordering and shows lineage using indentation and branch markers.
+- Search still filters by process name or PID.
 
 ### Search bar behavior
 
