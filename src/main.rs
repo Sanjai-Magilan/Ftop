@@ -947,8 +947,8 @@ fn render_system_panel(frame: &mut Frame, area: TuiRect, metrics: &RuntimeMetric
             metrics.mem_percent,
             &format!(
                 "{}/{}",
-                human_bytes(metrics.mem_used as f64, 1),
-                human_bytes(metrics.mem_total as f64, 1)
+                human_bytes(metrics.mem_used as f64, 2),
+                human_bytes(metrics.mem_total as f64, 2)
             ),
             inner_width,
         ),

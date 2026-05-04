@@ -2,6 +2,12 @@
 
 All notable changes in this project from the beginning.
 
+## 2026-05-04
+
+- Added a process tree view toggle in the process panel.
+- Rendered process hierarchy with parent/child branch markers while keeping sibling ordering by the active sort key.
+- Updated memory display values to show two decimal places.
+
 ## 2026-05-03
 
 - Updated the terminal UI color palette with a softer dark theme and clearer accent colors.
