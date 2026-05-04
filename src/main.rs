@@ -18,6 +18,8 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use sysinfo::{CpuExt, PidExt, ProcessExt, ProcessStatus, System, SystemExt};
 
+mod process_controller;
+
 const ASSUMED_CPU_PACKAGE_POWER_W: f32 = 65.0;
 const MIN_DISPLAY_POWER_W: f32 = 0.1;
 const NET_EMA_ALPHA: f64 = 0.35;
@@ -1037,6 +1039,20 @@ fn render_process_panel(
         proc_header.push_str(&format!(" | LOCK PID {}", pid));
     }
 
+    // Add selected process state indicator
+    if !metrics.procs.is_empty() && app.selected_index < metrics.procs.len() {
+        let selected_pid = metrics.procs[app.selected_index].pid;
+        match process_controller::ProcessController::get_process_status(selected_pid) {
+            Ok(is_stopped) => {
+                let state = if is_stopped { "STOPPED" } else { "RUNNING" };
+                proc_header.push_str(&format!(" | SELECTED: {} ({})", selected_pid, state));
+            }
+            Err(_) => {
+                proc_header.push_str(&format!(" | SELECTED: {} (?)", selected_pid));
+            }
+        }
+    }
+
     let table_width = area.width.saturating_sub(2) as usize;
     let table_mode = process_table_mode(table_width);
     let visible_rows = max(1, area.height.saturating_sub(3) as usize);
@@ -1163,7 +1179,7 @@ fn render_dashboard(frame: &mut Frame, app: &mut AppState, metrics: &RuntimeMetr
     let visible_rows = max(1, chunks[3].height.saturating_sub(3) as usize);
     let max_scroll = metrics.procs.len().saturating_sub(visible_rows);
     let mut help =
-        "q:quit  /:search  t:tree  Enter:lock/unlock  ↑/↓ or j/k:move  PgUp/PgDn:page  Home/End  x:kill  c/m/p:sort  r:refresh"
+        "q:quit  /:search  t:tree  s:sleep  w:wake  Enter:lock/unlock  ↑/↓ or j/k:move  PgUp/PgDn:page  Home/End  x:kill  c/m/p:sort  r:refresh"
             .to_string();
     if max_scroll > 0 {
         let pos = min(metrics.procs.len(), app.scroll_offset + 1);
@@ -1535,6 +1551,48 @@ fn run_app(refresh_rate: f64, top: usize) -> io::Result<()> {
                                     app.force_refresh = true;
                                 }
                             }
+                            KeyCode::Char('S') | KeyCode::Char('s') => {
+                                if metrics.procs.is_empty() {
+                                    app.status_message = "No process selected".to_string();
+                                    app.status_until = Instant::now() + Duration::from_secs(2);
+                                } else {
+                                    app.selected_index =
+                                        min(app.selected_index, metrics.procs.len() - 1);
+                                    let pid = metrics.procs[app.selected_index].pid;
+                                    match process_controller::ProcessController::suspend_process(pid) {
+                                        Ok(()) => {
+                                            app.status_message = format!("Suspended PID {}", pid);
+                                            app.status_until = Instant::now() + Duration::from_secs(2);
+                                            app.force_refresh = true;
+                                        }
+                                        Err(e) => {
+                                            app.status_message = format!("Failed to suspend: {}", e);
+                                            app.status_until = Instant::now() + Duration::from_millis(2800);
+                                        }
+                                    }
+                                }
+                            }
+                            KeyCode::Char('W') | KeyCode::Char('w') => {
+                                if metrics.procs.is_empty() {
+                                    app.status_message = "No process selected".to_string();
+                                    app.status_until = Instant::now() + Duration::from_secs(2);
+                                } else {
+                                    app.selected_index =
+                                        min(app.selected_index, metrics.procs.len() - 1);
+                                    let pid = metrics.procs[app.selected_index].pid;
+                                    match process_controller::ProcessController::resume_process(pid) {
+                                        Ok(()) => {
+                                            app.status_message = format!("Resumed PID {}", pid);
+                                            app.status_until = Instant::now() + Duration::from_secs(2);
+                                            app.force_refresh = true;
+                                        }
+                                        Err(e) => {
+                                            app.status_message = format!("Failed to resume: {}", e);
+                                            app.status_until = Instant::now() + Duration::from_millis(2800);
+                                        }
+                                    }
+                                }
+                            }
                             _ => {}
                         }
                     }
@@ -1593,6 +1651,66 @@ fn run_app(refresh_rate: f64, top: usize) -> io::Result<()> {
     }
 
     Ok(())
+}
+
+/// Example demonstrating ProcessController usage.
+///
+/// This can be integrated into the interactive UI loop. For example:
+/// - Press 's' to suspend the selected process
+/// - Press 'c' (or 'r') to resume the selected process
+/// - Check process status in the process table display
+///
+/// # Example Usage
+/// ```
+/// // In the main event loop, after capturing the selected process:
+/// use process_controller::ProcessController;
+///
+/// let selected_pid = metrics.procs[app.selected_index].pid;
+///
+/// // Suspend
+/// match ProcessController::suspend_process(selected_pid) {
+///     Ok(()) => app.status_message = format!("Suspended PID {}", selected_pid),
+///     Err(e) => app.status_message = format!("Failed: {}", e),
+/// }
+///
+/// // Check status
+/// match ProcessController::get_process_status(selected_pid) {
+///     Ok(is_stopped) => {
+///         if is_stopped {
+///             println!("Process is stopped");
+///         }
+///     }
+///     Err(e) => eprintln!("Error: {}", e),
+/// }
+///
+/// // Resume
+/// match ProcessController::resume_process(selected_pid) {
+///     Ok(()) => app.status_message = format!("Resumed PID {}", selected_pid),
+///     Err(e) => app.status_message = format!("Failed: {}", e),
+/// }
+/// ```
+#[allow(dead_code)]
+fn example_process_controller_usage() {
+    use process_controller::ProcessController;
+
+    // Example: suspend and then resume a process (would need a real PID)
+    let example_pid = std::process::id() as i32;
+
+    // Check the current status
+    match ProcessController::get_process_status(example_pid) {
+        Ok(is_stopped) => {
+            if is_stopped {
+                println!("Process {} is in stopped state", example_pid);
+                // Resume it
+                if let Err(e) = ProcessController::resume_process(example_pid) {
+                    eprintln!("Failed to resume: {}", e);
+                }
+            } else {
+                println!("Process {} is running", example_pid);
+            }
+        }
+        Err(e) => eprintln!("Failed to check status: {}", e),
+    }
 }
 
 fn main() {

@@ -45,6 +45,8 @@ cargo run --release -- --refresh 0.5 --top 20
 - `q` → Quit
 - `/` → Search/filter processes by name or PID
 - `t` → Toggle process tree view
+- `s` → Suspend (sleep) selected process
+- `w` → Resume (wake) selected process
 - `Enter` → Lock/unlock selection on the highlighted process
 - `↑/↓` or `j/k` → Move selection
 - `PgUp/PgDn` → Page up/down
@@ -54,6 +56,15 @@ cargo run --release -- --refresh 0.5 --top 20
 - `m` → Sort process list by memory
 - `p` → Sort process list by power consumption
 - `r` → Refresh immediately
+
+### Process control (suspend/resume)
+
+- Press `s` to suspend (sleep) the selected process using SIGSTOP. The process will stop executing and enter a stopped state.
+- Press `w` to resume (wake) a suspended process using SIGCONT. If the process is already running, this has no effect.
+- Suspended processes remain in memory and can be resumed at any time.
+- You must have permission (same user or root) to suspend/resume a process.
+- Use `Enter` to lock the selection on a specific process to keep controlling it even as the list updates.
+- **Selected process state**: The process panel header shows the selected process PID and its current state (RUNNING or STOPPED) for easy visibility.
 
 ### Process tree view
 
