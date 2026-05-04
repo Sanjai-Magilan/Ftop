@@ -33,17 +33,10 @@ All notable changes in this project from the beginning.
 
 - Migrated SysWatcher from Python to Rust.
 - Added Rust project files: `Cargo.toml` and `src/main.rs`.
-- Reimplemented terminal monitor loop, live metrics, process list sorting/filtering, lock, and process-tree kill in Rust.
-- Updated README for Cargo build/run workflow.
-- Fixed search cancel behavior so a single `Esc` press exits search mode reliably (no double-tap required).
-- Improved keyboard handling for escape-sequence timing to make standalone `Esc` more responsive.
-- Added a real terminal cursor in search mode and positioned it at the end of the search input.
-- Updated search UX to use the terminal's high-visibility cursor style when supported.
-- Updated `.gitignore` for Rust workflow (`target/` and editor temp files).
-- Removed legacy Python source and cache files from the project.
-- Improved memory measurement accuracy by parsing Linux `/proc/meminfo` fields including `SReclaimable`, `Shmem`, and `MemAvailable`.
-- Hardened `/proc/meminfo` and `/proc/net/dev` parsing to prevent one malformed line from breaking all metrics.
-- Fixed disk measurement accuracy by using direct `statvfs` syscall on root filesystem instead of relying on sysinfo crate.
+- Reimplemented the terminal monitor loop, live metrics, process controls, and process-tree kill behavior in Rust.
+- Updated README, `.gitignore`, and search UX for the new Rust workflow, including a reliable `Esc` cancel path and visible search cursor.
+- Improved Linux metric accuracy and robustness for memory, network, and disk sampling.
+- Removed legacy Python source and cache files.
 
 ## 2026-04-26
 
@@ -52,15 +45,9 @@ All notable changes in this project from the beginning.
 - Adjusted process table viewport to reserve space for the bottom search/status bar.
 - Updated README controls and UI behavior documentation.
 
-- Added power sorting option for top processes in the monitoring display (`p` key).
-- Updated README to include power sorting option for top processes.
-- Updated documentation for power sorting and per-process power estimation behavior.
-- Updated documentation and process display behavior for power sorting and full process listing.
-- Improved metric sampling (CPU, memory, network) and monitoring accuracy behavior.
-- Removed color handling logic from the monitoring display.
-- Improved memory usage sampling accuracy in the monitor.
-- Added process tree termination for kill action.
-- Added process search/filter by name or PID.
+- Added power sorting for top processes (`p` key) and documented per-process power estimation.
+- Improved metric sampling accuracy, removed color handling from the monitoring display, and refined memory usage calculations.
+- Added process-tree termination for kill actions and process search/filter by name or PID.
 
 ## 2026-04-24
 
