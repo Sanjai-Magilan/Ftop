@@ -203,6 +203,7 @@ impl Default for AppState {
 enum PendingAction {
     Suspend { pid: i32, msg: String },
     Resume { pid: i32, msg: String },
+    Kill { pid: i32, msg: String },
 }
 
 fn human_bytes(mut value: f64, decimals: usize) -> String {
@@ -1236,6 +1237,13 @@ fn render_dashboard(frame: &mut Frame, app: &mut AppState, metrics: &RuntimeMetr
                 )));
                 lines.push(Line::from(msg.clone()));
             }
+            PendingAction::Kill { pid, msg } => {
+                lines.push(Line::from(Span::styled(
+                    format!("Confirm kill PID {}", pid),
+                    theme::header_style(),
+                )));
+                lines.push(Line::from(msg.clone()));
+            }
         }
         lines.push(Line::from(""));
         lines.push(Line::from("Press Enter to confirm, Esc to cancel"));
@@ -1559,6 +1567,17 @@ fn run_app(refresh_rate: f64, top: usize) -> io::Result<()> {
                                                 }
                                             }
                                         }
+                                        PendingAction::Kill { pid, .. } => {
+                                            let (ok, msg) = kill_process_tree(pid);
+                                            app.status_message = msg;
+                                            app.status_until = Instant::now()
+                                                + if ok {
+                                                    Duration::from_secs(2)
+                                                } else {
+                                                    Duration::from_millis(2800)
+                                                };
+                                            app.force_refresh = true;
+                                        }
                                     }
                                     app.pending_action = None;
                                 }
@@ -1647,15 +1666,16 @@ fn run_app(refresh_rate: f64, top: usize) -> io::Result<()> {
                                     app.selected_index =
                                         min(app.selected_index, metrics.procs.len() - 1);
                                     let pid = metrics.procs[app.selected_index].pid;
-                                    let (ok, msg) = kill_process_tree(pid);
-                                    app.status_message = msg;
-                                    app.status_until = Instant::now()
-                                        + if ok {
-                                            Duration::from_secs(2)
-                                        } else {
-                                            Duration::from_millis(2800)
-                                        };
-                                    app.force_refresh = true;
+                                    let warning = format!(
+                                        "This will terminate PID {} and its children using SIGKILL. Press Enter to confirm, Esc to cancel",
+                                        pid
+                                    );
+                                    app.pending_action = Some(PendingAction::Kill {
+                                        pid,
+                                        msg: warning.clone(),
+                                    });
+                                    app.status_message = format!("Confirm: {}", warning);
+                                    app.status_until = Instant::now() + Duration::from_secs(8);
                                 }
                             }
                             KeyCode::Char('S') | KeyCode::Char('s') => {
