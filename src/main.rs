@@ -7,7 +7,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect as TuiRect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use std::cmp::{max, min};
 use std::collections::{HashMap, HashSet};
@@ -175,6 +175,7 @@ struct AppState {
     force_refresh: bool,
     down_rate_ema: f64,
     up_rate_ema: f64,
+    pending_action: Option<PendingAction>,
 }
 
 impl Default for AppState {
@@ -193,8 +194,15 @@ impl Default for AppState {
             force_refresh: true,
             down_rate_ema: 0.0,
             up_rate_ema: 0.0,
+            pending_action: None,
         }
     }
+}
+
+#[derive(Clone)]
+enum PendingAction {
+    Suspend { pid: i32, msg: String },
+    Resume { pid: i32, msg: String },
 }
 
 fn human_bytes(mut value: f64, decimals: usize) -> String {
@@ -253,15 +261,15 @@ fn process_table_header(mode: ProcessTableMode) -> String {
     match mode {
         ProcessTableMode::Full => format!(
             "{:>8} {:>5}  {:>5}  {:>4}  {:>11} {:>8} {:>9} {:>8}  {:>6}  {}",
-            "PID", "CPU%", "MEM%", "PRI", "UPTIME", "SHR", "VIRT", "RES", "PWR", "NAME"
+            "PID", "CPU%", "MEM%", "PRI", "UPTIME", "SHR", "VIRT", "RES", "PWR", "PROCESS"
         ),
         ProcessTableMode::Compact => format!(
             "{:>8} {:>5}  {:>5}  {:>8} {:>9} {:>8}  {:>6}  {}",
-            "PID", "CPU%", "MEM%", "SHR", "VIRT", "RES", "PWR", "NAME"
+            "PID", "CPU%", "MEM%", "SHR", "VIRT", "RES", "PWR", "PROCESS"
         ),
         ProcessTableMode::Tiny => format!(
             "{:>8} {:>5}  {:>5}  {:>8}  {}",
-            "PID", "CPU%", "MEM%", "RES", "NAME"
+            "PID", "CPU%", "MEM%", "RES", "PROCESS"
         ),
     }
 }
@@ -1193,6 +1201,58 @@ fn render_dashboard(frame: &mut Frame, app: &mut AppState, metrics: &RuntimeMetr
         chunks[5],
     );
 
+    // Render confirmation modal if pending_action is set
+    if let Some(pa) = &app.pending_action {
+        let area = frame.size();
+        let popup_w = (area.width as u16).saturating_mul(50) / 100;
+        let popup_h = 7u16;
+        let popup_x = area.x + (area.width.saturating_sub(popup_w)) / 2;
+        let popup_y = area.y + (area.height.saturating_sub(popup_h)) / 2;
+        let popup_rect = TuiRect::new(popup_x, popup_y, popup_w, popup_h);
+
+        frame.render_widget(Clear, popup_rect);
+        frame.render_widget(
+            Block::default()
+                .style(theme::panel_style())
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded),
+            popup_rect,
+        );
+
+        let mut lines = Vec::new();
+        match pa {
+            PendingAction::Suspend { pid, msg } => {
+                lines.push(Line::from(Span::styled(
+                    format!("Confirm suspend PID {}", pid),
+                    theme::header_style(),
+                )));
+                lines.push(Line::from(msg.clone()));
+            }
+            PendingAction::Resume { pid, msg } => {
+                lines.push(Line::from(Span::styled(
+                    format!("Confirm resume PID {}", pid),
+                    theme::header_style(),
+                )));
+                lines.push(Line::from(msg.clone()));
+            }
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from("Press Enter to confirm, Esc to cancel"));
+
+        frame.render_widget(
+            Paragraph::new(lines)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded)
+                        .title("Confirm")
+                        .style(theme::panel_style()),
+                )
+                .style(theme::panel_style()),
+            popup_rect,
+        );
+    }
+
     if app.search_mode {
         let cursor_x = min(
             chunks[4].right().saturating_sub(1),
@@ -1466,6 +1526,51 @@ fn run_app(refresh_rate: f64, top: usize) -> io::Result<()> {
                             _ => {}
                         }
                     } else {
+                        // If a confirmation modal is active, handle its keys first
+                        if let Some(pa) = app.pending_action.clone() {
+                            match key.code {
+                                KeyCode::Enter => {
+                                    match pa {
+                                        PendingAction::Suspend { pid, .. } => {
+                                            match process_controller::ProcessController::suspend_process(pid) {
+                                                Ok(()) => {
+                                                    app.status_message = format!("Suspended PID {}", pid);
+                                                    app.status_until = Instant::now() + Duration::from_secs(2);
+                                                    app.force_refresh = true;
+                                                }
+                                                Err(e) => {
+                                                    app.status_message = format!("Failed to suspend: {}", e);
+                                                    app.status_until = Instant::now() + Duration::from_millis(2800);
+                                                }
+                                            }
+                                        }
+                                        PendingAction::Resume { pid, .. } => {
+                                            match process_controller::ProcessController::resume_process(pid) {
+                                                Ok(()) => {
+                                                    app.status_message = format!("Resumed PID {}", pid);
+                                                    app.status_until = Instant::now() + Duration::from_secs(2);
+                                                    app.force_refresh = true;
+                                                }
+                                                Err(e) => {
+                                                    app.status_message = format!("Failed to resume: {}", e);
+                                                    app.status_until = Instant::now() + Duration::from_millis(2800);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    app.pending_action = None;
+                                }
+                                KeyCode::Esc => {
+                                    app.pending_action = None;
+                                    app.status_message = "Action cancelled".to_string();
+                                    app.status_until = Instant::now() + Duration::from_secs(1);
+                                }
+                                _ => {}
+                            }
+                            needs_draw = true;
+                            continue;
+                        }
+
                         match key.code {
                             KeyCode::Char('q') | KeyCode::Char('Q') => break,
                             KeyCode::Char('/') => {
@@ -1559,15 +1664,21 @@ fn run_app(refresh_rate: f64, top: usize) -> io::Result<()> {
                                     app.selected_index =
                                         min(app.selected_index, metrics.procs.len() - 1);
                                     let pid = metrics.procs[app.selected_index].pid;
-                                    match process_controller::ProcessController::suspend_process(pid) {
-                                        Ok(()) => {
-                                            app.status_message = format!("Suspended PID {}", pid);
-                                            app.status_until = Instant::now() + Duration::from_secs(2);
-                                            app.force_refresh = true;
-                                        }
-                                        Err(e) => {
-                                            app.status_message = format!("Failed to suspend: {}", e);
-                                            app.status_until = Instant::now() + Duration::from_millis(2800);
+                                    if let Some(msg) = process_controller::suspend_conflict(pid) {
+                                        app.pending_action = Some(PendingAction::Suspend { pid, msg: msg.clone() });
+                                        app.status_message = format!("Confirm: {}. Press Enter to proceed, Esc to cancel", msg);
+                                        app.status_until = Instant::now() + Duration::from_secs(8);
+                                    } else {
+                                        match process_controller::ProcessController::suspend_process(pid) {
+                                            Ok(()) => {
+                                                app.status_message = format!("Suspended PID {}", pid);
+                                                app.status_until = Instant::now() + Duration::from_secs(2);
+                                                app.force_refresh = true;
+                                            }
+                                            Err(e) => {
+                                                app.status_message = format!("Failed to suspend: {}", e);
+                                                app.status_until = Instant::now() + Duration::from_millis(2800);
+                                            }
                                         }
                                     }
                                 }
@@ -1580,15 +1691,21 @@ fn run_app(refresh_rate: f64, top: usize) -> io::Result<()> {
                                     app.selected_index =
                                         min(app.selected_index, metrics.procs.len() - 1);
                                     let pid = metrics.procs[app.selected_index].pid;
-                                    match process_controller::ProcessController::resume_process(pid) {
-                                        Ok(()) => {
-                                            app.status_message = format!("Resumed PID {}", pid);
-                                            app.status_until = Instant::now() + Duration::from_secs(2);
-                                            app.force_refresh = true;
-                                        }
-                                        Err(e) => {
-                                            app.status_message = format!("Failed to resume: {}", e);
-                                            app.status_until = Instant::now() + Duration::from_millis(2800);
+                                    if let Some(msg) = process_controller::resume_conflict(pid) {
+                                        app.pending_action = Some(PendingAction::Resume { pid, msg: msg.clone() });
+                                        app.status_message = format!("Confirm: {}. Press Enter to proceed, Esc to cancel", msg);
+                                        app.status_until = Instant::now() + Duration::from_secs(8);
+                                    } else {
+                                        match process_controller::ProcessController::resume_process(pid) {
+                                            Ok(()) => {
+                                                app.status_message = format!("Resumed PID {}", pid);
+                                                app.status_until = Instant::now() + Duration::from_secs(2);
+                                                app.force_refresh = true;
+                                            }
+                                            Err(e) => {
+                                                app.status_message = format!("Failed to resume: {}", e);
+                                                app.status_until = Instant::now() + Duration::from_millis(2800);
+                                            }
                                         }
                                     }
                                 }

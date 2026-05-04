@@ -232,6 +232,105 @@ fn collect_descendants(pid: i32, map: &HashMap<i32, Vec<i32>>, out: &mut Vec<i32
     }
 }
 
+/// Read the parent PID for a process from /proc/[pid]/stat
+fn read_parent_pid(pid: i32) -> Option<i32> {
+    if pid <= 0 {
+        return None;
+    }
+
+    let stat_path = format!("/proc/{}/stat", pid);
+    let stat = fs::read_to_string(stat_path).ok()?;
+    let fields = stat.split_whitespace().collect::<Vec<_>>();
+    if fields.len() < 5 {
+        return None;
+    }
+
+    fields[3].parse::<i32>().ok()
+}
+
+/// Find the nearest stopped ancestor of `pid` (returns its pid), if any.
+fn find_stopped_ancestor(pid: i32) -> Option<i32> {
+    let mut current = pid;
+    for _ in 0..128 {
+        let parent_pid = read_parent_pid(current)?;
+        if parent_pid <= 1 || parent_pid == current {
+            return None;
+        }
+
+        if let Ok(true) = ProcessController::get_process_status(parent_pid) {
+            return Some(parent_pid);
+        }
+
+        current = parent_pid;
+    }
+    None
+}
+
+/// Returns an optional warning string when suspending `pid` would affect a subtree
+/// or when the immediate parent exists. This does not block the action; it is
+/// only intended to provide UI text for confirmation popups.
+pub fn suspend_conflict(pid: i32) -> Option<String> {
+    if pid <= 0 {
+        return None;
+    }
+
+    let ppid_map = read_ppid_map();
+    let mut descendants = Vec::new();
+    collect_descendants(pid, &ppid_map, &mut descendants);
+
+    if let Some(parent) = read_parent_pid(pid) {
+        if parent > 0 {
+            // Inform if parent exists (regardless of its state) and if there are descendants
+            if !descendants.is_empty() {
+                return Some(format!(
+                    "PID {} has {} child(ren) and parent PID {} exists; suspend will apply to subtree",
+                    pid,
+                    descendants.len(),
+                    parent
+                ));
+            } else {
+                return Some(format!(
+                    "PID {} has parent PID {}; suspending the child without parent may be unintended",
+                    pid, parent
+                ));
+            }
+        }
+    }
+
+    // Fallback: if no parent info, still warn about subtree if present
+    if !descendants.is_empty() {
+        Some(format!("PID {} has {} child(ren); suspend will affect subtree", pid, descendants.len()))
+    } else {
+        None
+    }
+}
+
+/// Returns an optional warning string when resuming `pid` while an ancestor is stopped
+/// or when the resume affects a subtree. Intended for UI confirmation popups.
+pub fn resume_conflict(pid: i32) -> Option<String> {
+    if pid <= 0 {
+        return None;
+    }
+
+    let mut parts = Vec::new();
+    if let Some(ancestor) = find_stopped_ancestor(pid) {
+        parts.push(format!("ancestor PID {} is stopped", ancestor));
+    }
+
+    let ppid_map = read_ppid_map();
+    let mut descendants = Vec::new();
+    collect_descendants(pid, &ppid_map, &mut descendants);
+    if !descendants.is_empty() {
+        parts.push(format!("resume will apply to {} descendant(s)", descendants.len()));
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("; "))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
