@@ -1,5 +1,6 @@
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
+use std::collections::HashMap;
 use std::fs;
 
 /// Custom error type for process control operations.
@@ -37,7 +38,8 @@ impl ProcessController {
     ///
     /// SIGSTOP suspends process execution immediately and cannot be caught or ignored.
     /// The process enters the 'T' (Stopped) state and will not resume until SIGCONT is sent.
-    /// This is a hard stop that is reliable for controlling any process you have permission to control.
+    /// This controller applies the signal to the selected process and all of its descendants
+    /// so background worker processes freeze together with the parent.
     ///
     /// # Arguments
     /// * `pid` - The process ID to suspend
@@ -56,7 +58,7 @@ impl ProcessController {
     /// }
     /// ```
     pub fn suspend_process(pid: i32) -> Result<(), ProcessError> {
-        Self::send_signal(pid, Signal::SIGSTOP)
+        Self::send_signal_tree(pid, Signal::SIGSTOP)
     }
 
     /// Resume a process by sending SIGCONT.
@@ -64,6 +66,7 @@ impl ProcessController {
     /// SIGCONT resumes execution of a stopped process. If the process is not stopped,
     /// this signal has no effect but still succeeds. This allows safe resumption without
     /// needing to check the current state first.
+    /// The signal is also applied to all descendant processes so the full process tree wakes up.
     ///
     /// # Arguments
     /// * `pid` - The process ID to resume
@@ -82,7 +85,7 @@ impl ProcessController {
     /// }
     /// ```
     pub fn resume_process(pid: i32) -> Result<(), ProcessError> {
-        Self::send_signal(pid, Signal::SIGCONT)
+        Self::send_signal_tree(pid, Signal::SIGCONT)
     }
 
     /// Check if a process is in the 'Stopped' (T) state.
@@ -144,6 +147,88 @@ impl ProcessController {
             nix::Error::ESRCH => ProcessError::ProcessNotFound(pid),
             _ => ProcessError::SignalError(e.to_string()),
         })
+    }
+
+    fn send_signal_tree(pid: i32, signal: Signal) -> Result<(), ProcessError> {
+        if pid <= 0 {
+            return Err(ProcessError::InvalidStatus("Invalid process id".to_string()));
+        }
+
+        let ppid_map = read_ppid_map();
+        let mut targets = Vec::new();
+        collect_descendants(pid, &ppid_map, &mut targets);
+        targets.push(pid);
+
+        let mut signaled = 0_u32;
+        let mut denied = 0_u32;
+
+        for target in targets {
+            match Self::send_signal(target, signal) {
+                Ok(()) => {
+                    signaled += 1;
+                }
+                Err(ProcessError::PermissionDenied(_)) => {
+                    denied += 1;
+                }
+                Err(ProcessError::ProcessNotFound(_)) => {
+                    // Process already exited; treat as a no-op.
+                }
+                Err(err) => return Err(err),
+            }
+        }
+
+        if signaled == 0 {
+            if denied > 0 {
+                return Err(ProcessError::PermissionDenied(pid));
+            }
+            return Err(ProcessError::ProcessNotFound(pid));
+        }
+
+        if denied > 0 {
+            return Err(ProcessError::PermissionDenied(pid));
+        }
+
+        Ok(())
+    }
+}
+
+fn read_ppid_map() -> HashMap<i32, Vec<i32>> {
+    let mut map: HashMap<i32, Vec<i32>> = HashMap::new();
+
+    if let Ok(entries) = fs::read_dir("/proc") {
+        for entry in entries.flatten() {
+            let Ok(file_name) = entry.file_name().into_string() else {
+                continue;
+            };
+            let Ok(pid) = file_name.parse::<i32>() else {
+                continue;
+            };
+
+            let stat_path = format!("/proc/{}/stat", pid);
+            let Ok(stat) = fs::read_to_string(stat_path) else {
+                continue;
+            };
+            let fields = stat.split_whitespace().collect::<Vec<_>>();
+            if fields.len() < 5 {
+                continue;
+            }
+            let Ok(ppid) = fields[3].parse::<i32>() else {
+                continue;
+            };
+
+            map.entry(ppid).or_default().push(pid);
+        }
+    }
+
+    map
+}
+
+fn collect_descendants(pid: i32, map: &HashMap<i32, Vec<i32>>, out: &mut Vec<i32>) {
+    if let Some(children) = map.get(&pid) {
+        for child in children {
+            collect_descendants(*child, map, out);
+            out.push(*child);
+        }
     }
 }
 
