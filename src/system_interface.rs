@@ -10,7 +10,7 @@ use std::io;
 pub enum SystemError {
     NotFound(String),
     PermissionDenied(String),
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     InvalidData(String),
     Io(String),
 }
@@ -66,7 +66,7 @@ impl SystemInterface for RealSystem {
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[allow(dead_code)]
 #[derive(Default)]
 pub struct MockSystem {
     files: RefCell<HashMap<String, Result<String, SystemError>>>,
@@ -74,7 +74,7 @@ pub struct MockSystem {
     signals: RefCell<HashMap<(i32, i32), Result<(), SystemError>>>,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[allow(dead_code)]
 impl MockSystem {
     pub fn new() -> Self {
         Self::default()
