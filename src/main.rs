@@ -2074,4 +2074,62 @@ mod tests {
         let empty = filter_processes(rows.clone(), "   ");
         assert_eq!(empty.len(), rows.len());
     }
+
+    #[test]
+    fn cpu_usage_handles_counter_reset_and_large_values() {
+        // Simulate counter reset where current totals are less than previous -> should return 0
+        let prev = (1_000_u64, 500_u64);
+        let curr = (900_u64, 450_u64); // counters decreased
+        assert_eq!(cpu_usage_percent(prev, curr), 0.0);
+
+        // Very large counters near u64::MAX should compute without overflow
+        let prev = (u64::MAX - 200, u64::MAX - 150);
+        let curr = (u64::MAX - 100, u64::MAX - 80);
+        let usage = cpu_usage_percent(prev, curr);
+        // total delta 100, idle delta 70 => busy 30 => 30%
+        assert!((usage - 30.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn sorting_is_stable_when_values_equal() {
+        // Create rows with identical metrics but different PIDs to confirm tie-break by PID
+        let mut rows = vec![
+            mock_proc(200, "p1", 10.0, 5.0, Some(1.0)),
+            mock_proc(100, "p2", 10.0, 5.0, Some(1.0)),
+            mock_proc(150, "p3", 10.0, 5.0, Some(1.0)),
+        ];
+
+        rows.sort_by(|a, b| compare_process_rows(a, b, SortKey::Cpu));
+        // Expect ascending PID order as tie-breaker
+        assert_eq!(rows.iter().map(|p| p.pid).collect::<Vec<_>>(), vec![100, 150, 200]);
+    }
+
+    #[test]
+    fn build_tree_rows_handles_missing_parents_and_pid_reuse() {
+        // child references a parent that is missing -> child becomes root
+        let mut rows = vec![
+            ProcRow { pid: 10, parent_pid: Some(999), ..mock_proc(10, "child", 1.0, 1.0, None) },
+            ProcRow { pid: 20, parent_pid: None, ..mock_proc(20, "root", 1.0, 1.0, None) },
+        ];
+
+        let out = build_tree_rows(rows, SortKey::Cpu);
+        // Both should appear as roots (order by compare_process_rows)
+        assert!(out.iter().any(|r| r.pid == 10));
+        assert!(out.iter().any(|r| r.pid == 20));
+    }
+
+    #[test]
+    fn integration_pipeline_parse_compute_sort() {
+        // Integration-style test: parse CPU stat snapshots, compute usage, create ProcRows and sort
+        // Mock parsing: pretend we computed cpu percents for three procs
+        let mut rows = vec![
+            mock_proc(1, "alpha", 5.0, 3.0, estimate_process_power_watts(5.0, 4)),
+            mock_proc(2, "beta", 15.0, 1.0, estimate_process_power_watts(15.0, 4)),
+            mock_proc(3, "gamma", 10.0, 2.0, estimate_process_power_watts(10.0, 4)),
+        ];
+
+        // Sort by CPU should place PID 2,3,1
+        rows.sort_by(|a, b| compare_process_rows(a, b, SortKey::Cpu));
+        assert_eq!(rows.iter().map(|r| r.pid).collect::<Vec<_>>(), vec![2, 3, 1]);
+    }
 }

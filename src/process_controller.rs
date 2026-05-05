@@ -114,7 +114,6 @@ impl ProcessController {
     /// ```
     pub fn get_process_status(pid: i32) -> Result<bool, ProcessError> {
         let status_path = format!("/proc/{}/status", pid);
-
         let content = fs::read_to_string(&status_path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 ProcessError::ProcessNotFound(pid)
@@ -123,6 +122,13 @@ impl ProcessController {
             }
         })?;
 
+        // Use pure parsing helper so tests can validate parsing without reading filesystem.
+        Self::parse_process_status(&content)
+    }
+
+    /// Parse the contents of a /proc/[pid]/status file and return Ok(true) if stopped ('T'),
+    /// Ok(false) if running or other, or Err(ProcessError) if invalid.
+    pub fn parse_process_status(content: &str) -> Result<bool, ProcessError> {
         for line in content.lines() {
             if line.starts_with("State:") {
                 let state = line
@@ -135,7 +141,7 @@ impl ProcessController {
         }
 
         Err(ProcessError::InvalidStatus(
-            "State field not found in /proc/[pid]/status".to_string(),
+            "State field not found in status content".to_string(),
         ))
     }
 
@@ -240,11 +246,15 @@ fn read_parent_pid(pid: i32) -> Option<i32> {
 
     let stat_path = format!("/proc/{}/stat", pid);
     let stat = fs::read_to_string(stat_path).ok()?;
-    let fields = stat.split_whitespace().collect::<Vec<_>>();
+    parse_parent_pid_from_stat(&stat)
+}
+
+/// Parse a /proc/[pid]/stat content string and return parent pid if present.
+pub fn parse_parent_pid_from_stat(content: &str) -> Option<i32> {
+    let fields = content.split_whitespace().collect::<Vec<_>>();
     if fields.len() < 5 {
         return None;
     }
-
     fields[3].parse::<i32>().ok()
 }
 
@@ -347,5 +357,34 @@ mod tests {
         // Use a very high PID that shouldn't exist
         let result = ProcessController::get_process_status(999999);
         assert!(matches!(result, Err(ProcessError::ProcessNotFound(_))));
+    }
+
+    #[test]
+    fn parse_process_status_parses_stopped_and_running() {
+        let stopped = "Name:\ttest\nState:\tT (stopped)\n";
+        let running = "Name:\ttest\nState:\tR (running)\n";
+
+        assert_eq!(ProcessController::parse_process_status(stopped).unwrap(), true);
+        assert_eq!(ProcessController::parse_process_status(running).unwrap(), false);
+    }
+
+    #[test]
+    fn parse_process_status_handles_invalid_input() {
+        let bad = "Name: foo\n";
+        match ProcessController::parse_process_status(bad) {
+            Err(ProcessError::InvalidStatus(_)) => {}
+            other => panic!("expected InvalidStatus, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_parent_pid_from_stat_handles_various_inputs() {
+        // Typical stat content: pid (comm) state ppid ...
+        let stat = "1234 (bash) S 42 1 1 1 1 0 0 0 0 0 0 0 0 0 20 0 1 0";
+        assert_eq!(parse_parent_pid_from_stat(stat), Some(42));
+
+        // Invalid or too-short input
+        assert_eq!(parse_parent_pid_from_stat("") , None);
+        assert_eq!(parse_parent_pid_from_stat("1 (x)"), None);
     }
 }
