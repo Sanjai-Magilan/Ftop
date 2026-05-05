@@ -109,6 +109,7 @@ enum ProcessTableMode {
     Tiny,
 }
 
+#[derive(Clone)]
 struct ProcRow {
     pid: i32,
     parent_pid: Option<i32>,
@@ -295,6 +296,68 @@ fn estimate_process_power_watts(cpu_percent: f32, logical_cpus: usize) -> Option
     }
 }
 
+fn average_cpu_usage(cpu_per_core: &[f32]) -> f32 {
+    if cpu_per_core.is_empty() {
+        0.0
+    } else {
+        cpu_per_core.iter().copied().sum::<f32>() / cpu_per_core.len() as f32
+    }
+}
+
+fn parse_proc_stat_totals(content: &str) -> Option<(u64, u64)> {
+    let cpu_line = content.lines().find(|line| line.starts_with("cpu "))?;
+    let mut fields = cpu_line.split_whitespace();
+    let _cpu = fields.next()?;
+
+    let nums = fields
+        .map(str::parse::<u64>)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+
+    if nums.len() < 4 {
+        return None;
+    }
+
+    let idle = nums[3].saturating_add(*nums.get(4).unwrap_or(&0));
+    let total = nums.iter().copied().fold(0_u64, u64::saturating_add);
+    Some((total, idle))
+}
+
+fn cpu_usage_percent(prev: (u64, u64), curr: (u64, u64)) -> f32 {
+    let total_delta = curr.0.saturating_sub(prev.0);
+    if total_delta == 0 {
+        return 0.0;
+    }
+
+    let idle_delta = curr.1.saturating_sub(prev.1);
+    let busy_delta = total_delta.saturating_sub(idle_delta);
+    (busy_delta as f64 / total_delta as f64 * 100.0) as f32
+}
+
+fn parse_proc_stat_tail_fields(content: &str) -> Option<Vec<&str>> {
+    let end_comm = content.rfind(") ")?;
+    let tail = &content[end_comm + 2..];
+    Some(tail.split_whitespace().collect::<Vec<_>>())
+}
+
+fn parse_parent_pid_from_stat(content: &str) -> Option<i32> {
+    let fields = parse_proc_stat_tail_fields(content)?;
+    if fields.len() < 2 {
+        return None;
+    }
+    fields[1].parse::<i32>().ok()
+}
+
+fn parse_priority_from_stat(content: &str) -> i64 {
+    let Some(fields) = parse_proc_stat_tail_fields(content) else {
+        return 0;
+    };
+    if fields.len() < 16 {
+        return 0;
+    }
+    fields[15].parse::<i64>().unwrap_or(0)
+}
+
 fn format_power_usage(watts: Option<f32>) -> String {
     match watts {
         Some(v) => format!("{:.1}W", v),
@@ -332,17 +395,7 @@ fn read_process_priority(pid: i32) -> i64 {
         return 0;
     };
 
-    let Some(end_comm) = content.rfind(") ") else {
-        return 0;
-    };
-
-    let tail = &content[end_comm + 2..];
-    let fields = tail.split_whitespace().collect::<Vec<_>>();
-    if fields.len() < 16 {
-        return 0;
-    }
-
-    fields[15].parse::<i64>().unwrap_or(0)
+    parse_priority_from_stat(&content)
 }
 
 fn now_text() -> String {
@@ -355,6 +408,10 @@ fn now_text() -> String {
 
 fn parse_meminfo() -> Option<MemInfo> {
     let content = fs::read_to_string("/proc/meminfo").ok()?;
+    parse_meminfo_content(&content)
+}
+
+fn parse_meminfo_content(content: &str) -> Option<MemInfo> {
     let mut total = 0_u64;
     let mut free = 0_u64;
     let mut buffers = 0_u64;
@@ -405,31 +462,36 @@ fn parse_meminfo() -> Option<MemInfo> {
     }
 }
 
+fn memory_usage_from_meminfo(mi: &MemInfo) -> (u64, u64, f32) {
+    // Linux "actual used" approximation:
+    // used = total - free - buffers - (cached + reclaimable - shmem)
+    let effective_cache = mi
+        .cached
+        .saturating_add(mi.sreclaimable)
+        .saturating_sub(mi.shmem);
+    let mut used = mi.total.saturating_sub(
+        mi.free
+            .saturating_add(mi.buffers)
+            .saturating_add(effective_cache),
+    );
+
+    // Fallback when formula is unstable on some kernels/containers.
+    if mi.available > 0 && (used == 0 || used > mi.total) {
+        used = mi.total.saturating_sub(mi.available);
+    }
+
+    let pct = if mi.total > 0 {
+        (used as f64 / mi.total as f64 * 100.0) as f32
+    } else {
+        0.0
+    };
+
+    (used, mi.total, pct)
+}
+
 fn sample_memory_usage(system: &System) -> (u64, u64, f32) {
     if let Some(mi) = parse_meminfo() {
-        // Linux "actual used" approximation:
-        // used = total - free - buffers - (cached + reclaimable - shmem)
-        let effective_cache = mi
-            .cached
-            .saturating_add(mi.sreclaimable)
-            .saturating_sub(mi.shmem);
-        let mut used = mi.total.saturating_sub(
-            mi.free
-                .saturating_add(mi.buffers)
-                .saturating_add(effective_cache),
-        );
-
-        // Fallback when formula is unstable on some kernels/containers.
-        if mi.available > 0 && (used == 0 || used > mi.total) {
-            used = mi.total.saturating_sub(mi.available);
-        }
-
-        let pct = if mi.total > 0 {
-            (used as f64 / mi.total as f64 * 100.0) as f32
-        } else {
-            0.0
-        };
-        return (used, mi.total, pct);
+        return memory_usage_from_meminfo(&mi);
     }
 
     let total = system.total_memory();
@@ -632,11 +694,7 @@ fn read_ppid_map() -> HashMap<i32, Vec<i32>> {
             let Ok(stat) = fs::read_to_string(stat_path) else {
                 continue;
             };
-            let fields = stat.split_whitespace().collect::<Vec<_>>();
-            if fields.len() < 5 {
-                continue;
-            }
-            let Ok(ppid) = fields[3].parse::<i32>() else {
+            let Some(ppid) = parse_parent_pid_from_stat(&stat) else {
                 continue;
             };
 
@@ -1378,11 +1436,7 @@ fn sample_metrics(
         .iter()
         .map(|c| c.cpu_usage())
         .collect::<Vec<_>>();
-    let cpu_total = if cpu_per_core.is_empty() {
-        0.0
-    } else {
-        cpu_per_core.iter().copied().sum::<f32>() / cpu_per_core.len() as f32
-    };
+    let cpu_total = average_cpu_usage(&cpu_per_core);
 
     let load = system.load_average();
     let uptime_text = human_uptime(system.uptime());
@@ -1868,5 +1922,156 @@ fn main() {
 
     if let Err(err) = result {
         eprintln!("Error: {}", err);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mock_proc(pid: i32, name: &str, cpu: f32, mem: f32, power: Option<f32>) -> ProcRow {
+        ProcRow {
+            pid,
+            parent_pid: None,
+            cpu_percent: cpu,
+            mem_percent: mem,
+            power_watts: power,
+            uptime_secs: 0,
+            shared_bytes: 0,
+            virtual_bytes: 0,
+            resident_bytes: 0,
+            priority: 0,
+            name: name.to_string(),
+            tree_prefix: String::new(),
+            tree_marker: String::new(),
+        }
+    }
+
+    #[test]
+    fn parse_meminfo_content_parses_expected_fields() {
+        // Validates /proc/meminfo parsing from realistic text and kB-to-bytes conversion.
+        let input = "MemTotal:       8000000 kB\nMemFree:        1000000 kB\nBuffers:         200000 kB\nCached:         1500000 kB\nSReclaimable:    300000 kB\nShmem:           100000 kB\nMemAvailable:   5000000 kB\n";
+
+        let parsed = parse_meminfo_content(input).expect("expected meminfo to parse");
+        assert_eq!(parsed.total, 8_000_000 * 1024);
+        assert_eq!(parsed.free, 1_000_000 * 1024);
+        assert_eq!(parsed.cached, 1_500_000 * 1024);
+        assert_eq!(parsed.available, 5_000_000 * 1024);
+    }
+
+    #[test]
+    fn parse_meminfo_content_rejects_missing_total() {
+        // Validates invalid input handling when MemTotal is absent.
+        let input = "MemFree: 123 kB\nCached: 99 kB\n";
+        assert!(parse_meminfo_content(input).is_none());
+    }
+
+    #[test]
+    fn memory_usage_from_meminfo_uses_available_fallback_when_formula_zero() {
+        // Validates edge case where formula yields 0 and fallback uses MemAvailable.
+        let mi = MemInfo {
+            total: 10_000,
+            free: 2_000,
+            buffers: 1_000,
+            cached: 6_000,
+            sreclaimable: 1_000,
+            shmem: 0,
+            available: 3_000,
+        };
+
+        let (used, total, pct) = memory_usage_from_meminfo(&mi);
+        assert_eq!(used, 7_000);
+        assert_eq!(total, 10_000);
+        assert!((pct - 70.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn estimate_process_power_watts_handles_zero_inputs() {
+        // Validates division-by-zero prevention and zero/negative usage handling.
+        assert_eq!(estimate_process_power_watts(50.0, 0), None);
+        assert_eq!(estimate_process_power_watts(0.0, 8), None);
+        assert_eq!(estimate_process_power_watts(-2.0, 8), None);
+    }
+
+    #[test]
+    fn average_cpu_usage_handles_empty_and_nonempty() {
+        // Validates aggregate CPU calculation for empty and populated samples.
+        assert_eq!(average_cpu_usage(&[]), 0.0);
+        assert!((average_cpu_usage(&[10.0, 20.0, 40.0]) - 23.333334).abs() < 0.001);
+    }
+
+    #[test]
+    fn parse_proc_stat_totals_and_cpu_usage_percent_work_with_realistic_data() {
+        // Validates /proc/stat parsing and usage delta math from two snapshots.
+        let prev = "cpu  100 0 50 850 0 0 0 0 0 0\n";
+        let curr = "cpu  130 0 70 900 0 0 0 0 0 0\n";
+
+        let prev_totals = parse_proc_stat_totals(prev).expect("prev should parse");
+        let curr_totals = parse_proc_stat_totals(curr).expect("curr should parse");
+        let usage = cpu_usage_percent(prev_totals, curr_totals);
+
+        // total delta = 100, idle delta = 50 => busy = 50 => 50%
+        assert!((usage - 50.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn cpu_usage_percent_returns_zero_when_total_delta_is_zero() {
+        // Validates division-by-zero edge case for CPU usage math.
+        assert_eq!(cpu_usage_percent((100, 80), (100, 90)), 0.0);
+    }
+
+    #[test]
+    fn parse_parent_and_priority_from_proc_stat_handle_parentheses_in_comm() {
+        // Validates /proc/[pid]/stat parsing when process name contains spaces/parentheses.
+        let stat = "1234 (my worker(thread)) S 42 1 1 1 1 0 0 0 0 0 0 0 0 0 20 0 1 0";
+        assert_eq!(parse_parent_pid_from_stat(stat), Some(42));
+        assert_eq!(parse_priority_from_stat(stat), 20);
+    }
+
+    #[test]
+    fn parse_parent_and_priority_from_proc_stat_reject_invalid_input() {
+        // Validates invalid /proc/[pid]/stat input handling without panics.
+        assert_eq!(parse_parent_pid_from_stat(""), None);
+        assert_eq!(parse_priority_from_stat("1 (x)"), 0);
+    }
+
+    #[test]
+    fn compare_process_rows_sorts_by_cpu_mem_and_power_desc() {
+        // Validates core sorting behavior for CPU, memory, and power keys.
+        let mut rows = vec![
+            mock_proc(10, "a", 10.0, 20.0, Some(1.0)),
+            mock_proc(11, "b", 30.0, 10.0, Some(0.5)),
+            mock_proc(12, "c", 20.0, 40.0, Some(2.5)),
+        ];
+
+        rows.sort_by(|a, b| compare_process_rows(a, b, SortKey::Cpu));
+        assert_eq!(rows.iter().map(|p| p.pid).collect::<Vec<_>>(), vec![11, 12, 10]);
+
+        rows.sort_by(|a, b| compare_process_rows(a, b, SortKey::Mem));
+        assert_eq!(rows.iter().map(|p| p.pid).collect::<Vec<_>>(), vec![12, 10, 11]);
+
+        rows.sort_by(|a, b| compare_process_rows(a, b, SortKey::Power));
+        assert_eq!(rows.iter().map(|p| p.pid).collect::<Vec<_>>(), vec![12, 10, 11]);
+    }
+
+    #[test]
+    fn filter_processes_matches_pid_or_name_and_handles_empty_query() {
+        // Validates filtering behavior, case-insensitive name matching, and empty-query passthrough.
+        let rows = vec![
+            mock_proc(101, "AlphaWorker", 0.0, 0.0, None),
+            mock_proc(202, "beta", 0.0, 0.0, None),
+            mock_proc(303, "gamma", 0.0, 0.0, None),
+        ];
+
+        let by_name = filter_processes(rows.clone(), "ALPHA");
+        assert_eq!(by_name.len(), 1);
+        assert_eq!(by_name[0].pid, 101);
+
+        let by_pid = filter_processes(rows.clone(), "02");
+        assert_eq!(by_pid.len(), 1);
+        assert_eq!(by_pid[0].pid, 202);
+
+        let empty = filter_processes(rows.clone(), "   ");
+        assert_eq!(empty.len(), rows.len());
     }
 }
