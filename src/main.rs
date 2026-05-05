@@ -2,7 +2,6 @@ use crossterm::cursor::{Hide, Show};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
-use libc::{kill, SIGKILL};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect as TuiRect};
 use ratatui::style::{Color, Modifier, Style};
@@ -19,6 +18,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use sysinfo::{CpuExt, PidExt, ProcessExt, ProcessStatus, System, SystemExt};
 
 mod process_controller;
+mod system_interface;
+
+use system_interface::{RealSystem, SystemInterface};
 
 const ASSUMED_CPU_PACKAGE_POWER_W: f32 = 65.0;
 const MIN_DISPLAY_POWER_W: f32 = 0.1;
@@ -375,8 +377,13 @@ fn page_size_bytes() -> u64 {
 }
 
 fn read_shared_bytes(pid: i32, page_size: u64) -> u64 {
+    let system = RealSystem::default();
+    read_shared_bytes_with(&system, pid, page_size)
+}
+
+fn read_shared_bytes_with<S: SystemInterface + ?Sized>(system: &S, pid: i32, page_size: u64) -> u64 {
     let path = format!("/proc/{}/statm", pid);
-    let Ok(content) = fs::read_to_string(path) else {
+    let Ok(content) = system.read_file(&path) else {
         return 0;
     };
     let parts = content.split_whitespace().collect::<Vec<_>>();
@@ -390,8 +397,13 @@ fn read_shared_bytes(pid: i32, page_size: u64) -> u64 {
 }
 
 fn read_process_priority(pid: i32) -> i64 {
+    let system = RealSystem::default();
+    read_process_priority_with(&system, pid)
+}
+
+fn read_process_priority_with<S: SystemInterface + ?Sized>(system: &S, pid: i32) -> i64 {
     let path = format!("/proc/{}/stat", pid);
-    let Ok(content) = fs::read_to_string(path) else {
+    let Ok(content) = system.read_file(&path) else {
         return 0;
     };
 
@@ -407,7 +419,12 @@ fn now_text() -> String {
 }
 
 fn parse_meminfo() -> Option<MemInfo> {
-    let content = fs::read_to_string("/proc/meminfo").ok()?;
+    let system = RealSystem::default();
+    parse_meminfo_with(&system)
+}
+
+fn parse_meminfo_with<S: SystemInterface + ?Sized>(system: &S) -> Option<MemInfo> {
+    let content = system.read_file("/proc/meminfo").ok()?;
     parse_meminfo_content(&content)
 }
 
@@ -678,28 +695,33 @@ fn build_tree_rows(rows: Vec<ProcRow>, sort_key: SortKey) -> Vec<ProcRow> {
     out
 }
 
+#[allow(dead_code)]
 fn read_ppid_map() -> HashMap<i32, Vec<i32>> {
+    let system = RealSystem::default();
+    read_ppid_map_with(&system)
+}
+
+fn read_ppid_map_with<S: SystemInterface + ?Sized>(system: &S) -> HashMap<i32, Vec<i32>> {
     let mut map: HashMap<i32, Vec<i32>> = HashMap::new();
 
-    if let Ok(entries) = fs::read_dir("/proc") {
-        for entry in entries.flatten() {
-            let Ok(file_name) = entry.file_name().into_string() else {
-                continue;
-            };
-            let Ok(pid) = file_name.parse::<i32>() else {
-                continue;
-            };
+    let Ok(entries) = system.read_dir("/proc") else {
+        return map;
+    };
 
-            let stat_path = format!("/proc/{}/stat", pid);
-            let Ok(stat) = fs::read_to_string(stat_path) else {
-                continue;
-            };
-            let Some(ppid) = parse_parent_pid_from_stat(&stat) else {
-                continue;
-            };
+    for file_name in entries {
+        let Ok(pid) = file_name.parse::<i32>() else {
+            continue;
+        };
 
-            map.entry(ppid).or_default().push(pid);
-        }
+        let stat_path = format!("/proc/{}/stat", pid);
+        let Ok(stat) = system.read_file(&stat_path) else {
+            continue;
+        };
+        let Some(ppid) = parse_parent_pid_from_stat(&stat) else {
+            continue;
+        };
+
+        map.entry(ppid).or_default().push(pid);
     }
 
     map
@@ -715,11 +737,16 @@ fn collect_descendants(pid: i32, map: &HashMap<i32, Vec<i32>>, out: &mut Vec<i32
 }
 
 fn kill_process_tree(pid: i32) -> (bool, String) {
+    let system = RealSystem::default();
+    kill_process_tree_with(&system, pid)
+}
+
+fn kill_process_tree_with<S: SystemInterface + ?Sized>(system: &S, pid: i32) -> (bool, String) {
     if pid <= 0 {
         return (false, "Invalid process id".to_string());
     }
 
-    let ppid_map = read_ppid_map();
+    let ppid_map = read_ppid_map_with(system);
     let mut targets = Vec::new();
     collect_descendants(pid, &ppid_map, &mut targets);
     targets.push(pid);
@@ -728,16 +755,10 @@ fn kill_process_tree(pid: i32) -> (bool, String) {
     let mut denied = 0_u32;
 
     for target in targets {
-        let rc = unsafe { kill(target, SIGKILL) };
-        if rc == 0 {
+        if system.kill_process(target).is_ok() {
             killed += 1;
         } else {
-            let err = io::Error::last_os_error();
-            if let Some(code) = err.raw_os_error() {
-                if code == libc::EPERM {
-                    denied += 1;
-                }
-            }
+            denied += 1;
         }
     }
 
@@ -1928,6 +1949,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::system_interface::{MockSystem, SystemError};
 
     fn mock_proc(pid: i32, name: &str, cpu: f32, mem: f32, power: Option<f32>) -> ProcRow {
         ProcRow {
@@ -2107,7 +2129,7 @@ mod tests {
     #[test]
     fn build_tree_rows_handles_missing_parents_and_pid_reuse() {
         // child references a parent that is missing -> child becomes root
-        let mut rows = vec![
+        let rows = vec![
             ProcRow { pid: 10, parent_pid: Some(999), ..mock_proc(10, "child", 1.0, 1.0, None) },
             ProcRow { pid: 20, parent_pid: None, ..mock_proc(20, "root", 1.0, 1.0, None) },
         ];
@@ -2122,14 +2144,84 @@ mod tests {
     fn integration_pipeline_parse_compute_sort() {
         // Integration-style test: parse CPU stat snapshots, compute usage, create ProcRows and sort
         // Mock parsing: pretend we computed cpu percents for three procs
-        let mut rows = vec![
+        let rows = vec![
             mock_proc(1, "alpha", 5.0, 3.0, estimate_process_power_watts(5.0, 4)),
             mock_proc(2, "beta", 15.0, 1.0, estimate_process_power_watts(15.0, 4)),
             mock_proc(3, "gamma", 10.0, 2.0, estimate_process_power_watts(10.0, 4)),
         ];
 
+        let mut rows = rows;
         // Sort by CPU should place PID 2,3,1
         rows.sort_by(|a, b| compare_process_rows(a, b, SortKey::Cpu));
         assert_eq!(rows.iter().map(|r| r.pid).collect::<Vec<_>>(), vec![2, 3, 1]);
+    }
+
+    #[test]
+    fn mock_system_drives_shared_bytes_priority_and_meminfo_parsing() {
+        // Prevents regressions where file reads are still hard-wired to the real OS.
+        let system = MockSystem::new()
+            .with_file("/proc/50/statm", "1 2 3 4 5")
+            .with_file(
+                "/proc/50/stat",
+                "50 (proc with spaces) S 1 1 1 1 1 0 0 0 0 0 0 0 0 0 42 0 1 0",
+            )
+            .with_file(
+                "/proc/meminfo",
+                "MemTotal: 1000 kB\nMemFree: 250 kB\nBuffers: 0 kB\nCached: 0 kB\nSReclaimable: 0 kB\nShmem: 0 kB\nMemAvailable: 800 kB\n",
+            );
+
+        assert_eq!(read_shared_bytes_with(&system, 50, 4096), 12_288);
+        assert_eq!(read_process_priority_with(&system, 50), 42);
+        let mem = parse_meminfo_with(&system).expect("mock meminfo should parse");
+        assert_eq!(mem.total, 1_000 * 1024);
+    }
+
+    #[test]
+    fn mock_system_handles_file_not_found_and_corrupted_data() {
+        // Prevents crashes when /proc files disappear or contain truncated content.
+        let system = MockSystem::new()
+            .with_file_error(
+                "/proc/meminfo",
+                SystemError::NotFound("/proc/meminfo".to_string()),
+            )
+            .with_file("/proc/60/statm", "broken")
+            .with_dir_error(
+                "/proc",
+                SystemError::Io("directory unavailable".to_string()),
+            )
+            .with_file_error(
+                "/proc/61/stat",
+                SystemError::NotFound("/proc/61/stat".to_string()),
+            );
+
+        assert!(parse_meminfo_with(&system).is_none());
+        assert_eq!(read_shared_bytes_with(&system, 60, 4096), 0);
+        assert_eq!(read_process_priority_with(&system, 60), 0);
+
+        let map = read_ppid_map_with(&system);
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn mock_system_kill_tree_reports_permission_denied() {
+        // Prevents the kill path from treating EPERM as a successful kill.
+        let system = MockSystem::new()
+            .with_dir("/proc", vec!["70".to_string(), "71".to_string()])
+            .with_file("/proc/70/stat", "70 (parent) S 1 1 1 1 1 0 0 0 0 0 0 0 0 0 20 0 1 0")
+            .with_file("/proc/71/stat", "71 (child) S 70 1 1 1 1 0 0 0 0 0 0 0 0 0 20 0 1 0")
+            .with_signal_result(
+                70,
+                nix::sys::signal::Signal::SIGKILL,
+                Err(SystemError::PermissionDenied("pid 70".to_string())),
+            )
+            .with_signal_result(
+                71,
+                nix::sys::signal::Signal::SIGKILL,
+                Err(SystemError::PermissionDenied("pid 71".to_string())),
+            );
+
+        let result = kill_process_tree_with(&system, 70);
+        assert!(!result.0);
+        assert!(result.1.contains("Permission denied"));
     }
 }
