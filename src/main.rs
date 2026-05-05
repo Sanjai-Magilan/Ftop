@@ -1665,11 +1665,16 @@ fn run_app(refresh_rate: f64, top: usize) -> io::Result<()> {
                                 } else {
                                     app.selected_index =
                                         min(app.selected_index, metrics.procs.len() - 1);
-                                    let pid = metrics.procs[app.selected_index].pid;
-                                    let warning = format!(
-                                        "This will terminate PID {} and its children using SIGKILL. Press Enter to confirm, Esc to cancel",
-                                        pid
-                                    );
+                                    let selected = &metrics.procs[app.selected_index];
+                                    let pid = selected.pid;
+                                    let warning = if matches!(selected.parent_pid, Some(parent_pid) if parent_pid > 1) {
+                                        "this is a child process do u want to kill it".to_string()
+                                    } else {
+                                        format!(
+                                            "This will terminate PID {} and its children using SIGKILL. Press Enter to confirm, Esc to cancel",
+                                            pid
+                                        )
+                                    };
                                     app.pending_action = Some(PendingAction::Kill {
                                         pid,
                                         msg: warning.clone(),
