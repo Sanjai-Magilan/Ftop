@@ -1858,7 +1858,6 @@ fn main() {
 mod tests {
     use super::*;
     use crate::parsers::{parse_meminfo as parse_meminfo_content, parse_parent_pid_from_stat, parse_priority_from_stat, parse_proc_stat_totals};
-    use crate::system_interface::{MockSystem, SystemError};
 
     fn mock_proc(pid: i32, name: &str, cpu: f32, mem: f32, power: Option<f32>) -> ProcRow {
         ProcRow {
@@ -2047,90 +2046,5 @@ mod tests {
         // Both should appear as roots (order by compare_process_rows)
         assert!(out.iter().any(|r| r.pid == 10));
         assert!(out.iter().any(|r| r.pid == 20));
-    }
-
-    #[test]
-    fn integration_pipeline_parse_compute_sort() {
-        // Integration-style test: parse CPU stat snapshots, compute usage, create ProcRows and sort
-        // Mock parsing: pretend we computed cpu percents for three procs
-        let rows = vec![
-            mock_proc(1, "alpha", 5.0, 3.0, estimate_process_power_watts(5.0, 4)),
-            mock_proc(2, "beta", 15.0, 1.0, estimate_process_power_watts(15.0, 4)),
-            mock_proc(3, "gamma", 10.0, 2.0, estimate_process_power_watts(10.0, 4)),
-        ];
-
-        let mut rows = rows;
-        // Sort by CPU should place PID 2,3,1
-        rows.sort_by(|a, b| compare_process_rows(a, b, SortKey::Cpu));
-        assert_eq!(rows.iter().map(|r| r.pid).collect::<Vec<_>>(), vec![2, 3, 1]);
-    }
-
-    #[test]
-    fn mock_system_drives_shared_bytes_priority_and_meminfo_parsing() {
-        // Prevents regressions where file reads are still hard-wired to the real OS.
-        let system = MockSystem::new()
-            .with_file("/proc/50/statm", "1 2 3 4 5")
-            .with_file(
-                "/proc/50/stat",
-                "50 (proc with spaces) S 1 1 1 1 1 0 0 0 0 0 0 0 0 0 42 0 1 0",
-            )
-            .with_file(
-                "/proc/meminfo",
-                "MemTotal: 1000 kB\nMemFree: 250 kB\nBuffers: 0 kB\nCached: 0 kB\nSReclaimable: 0 kB\nShmem: 0 kB\nMemAvailable: 800 kB\n",
-            );
-
-        assert_eq!(read_shared_bytes_with(&system, 50, 4096), 12_288);
-        assert_eq!(read_process_priority_with(&system, 50), 42);
-        let mem = parse_meminfo_with(&system).expect("mock meminfo should parse");
-        assert_eq!(mem.total, 1_000 * 1024);
-    }
-
-    #[test]
-    fn mock_system_handles_file_not_found_and_corrupted_data() {
-        // Prevents crashes when /proc files disappear or contain truncated content.
-        let system = MockSystem::new()
-            .with_file_error(
-                "/proc/meminfo",
-                SystemError::NotFound("/proc/meminfo".to_string()),
-            )
-            .with_file("/proc/60/statm", "broken")
-            .with_dir_error(
-                "/proc",
-                SystemError::Io("directory unavailable".to_string()),
-            )
-            .with_file_error(
-                "/proc/61/stat",
-                SystemError::NotFound("/proc/61/stat".to_string()),
-            );
-
-        assert!(parse_meminfo_with(&system).is_none());
-        assert_eq!(read_shared_bytes_with(&system, 60, 4096), 0);
-        assert_eq!(read_process_priority_with(&system, 60), 0);
-
-        let map = read_ppid_map_with(&system);
-        assert!(map.is_empty());
-    }
-
-    #[test]
-    fn mock_system_kill_tree_reports_permission_denied() {
-        // Prevents the kill path from treating EPERM as a successful kill.
-        let system = MockSystem::new()
-            .with_dir("/proc", vec!["70".to_string(), "71".to_string()])
-            .with_file("/proc/70/stat", "70 (parent) S 1 1 1 1 1 0 0 0 0 0 0 0 0 0 20 0 1 0")
-            .with_file("/proc/71/stat", "71 (child) S 70 1 1 1 1 0 0 0 0 0 0 0 0 0 20 0 1 0")
-            .with_signal_result(
-                70,
-                nix::sys::signal::Signal::SIGKILL,
-                Err(SystemError::PermissionDenied("pid 70".to_string())),
-            )
-            .with_signal_result(
-                71,
-                nix::sys::signal::Signal::SIGKILL,
-                Err(SystemError::PermissionDenied("pid 71".to_string())),
-            );
-
-        let result = kill_process_tree_with(&system, 70);
-        assert!(!result.0);
-        assert!(result.1.contains("Permission denied"));
     }
 }

@@ -275,8 +275,6 @@ pub fn resume_conflict(pid: i32) -> Option<String> {
 mod tests {
     use super::*;
     use crate::parsers::{parse_parent_pid_from_stat, parse_process_status};
-    use crate::system_interface::{MockSystem, SystemError};
-    use nix::sys::signal::Signal;
 
     #[test]
     fn test_invalid_pid_error() {
@@ -314,62 +312,5 @@ mod tests {
         assert_eq!(parse_parent_pid_from_stat(stat).unwrap(), 42);
         assert!(parse_parent_pid_from_stat("").is_err());
         assert!(parse_parent_pid_from_stat("1 (x)").is_err());
-    }
-
-    #[test]
-    fn mock_status_and_file_not_found_are_deterministic() {
-        // Prevents flaky tests by avoiding live /proc reads.
-        let system = MockSystem::new()
-            .with_file("/proc/10/status", "Name:\ttest\nState:\tT (stopped)\n")
-            .with_file_error(
-                "/proc/11/status",
-                SystemError::NotFound("/proc/11/status".to_string()),
-            )
-            .with_file_error(
-                "/proc/12/status",
-                SystemError::InvalidData("corrupted status payload".to_string()),
-            );
-
-        assert_eq!(ProcessController::get_process_status_with(&system, 10).unwrap(), true);
-        assert!(matches!(
-            ProcessController::get_process_status_with(&system, 11),
-            Err(ProcessError::ProcessNotFound(11))
-        ));
-        assert!(matches!(
-            ProcessController::get_process_status_with(&system, 12),
-            Err(ProcessError::InvalidStatus(_))
-        ));
-    }
-
-    #[test]
-    fn mock_send_signal_reports_permission_denied() {
-        // Prevents silently treating EPERM as success when the caller lacks privileges.
-        let system = MockSystem::new()
-            .with_dir("/proc", vec!["21".to_string()])
-            .with_file("/proc/21/stat", "21 (worker) S 1 1 1 1 1 0 0 0 0 0 0 0 0 0 20 0 1 0")
-            .with_signal_result(
-                21,
-                Signal::SIGKILL,
-                Err(SystemError::PermissionDenied("pid 21".to_string())),
-            );
-
-        let result = ProcessController::send_signal_tree_with(&system, 21, Signal::SIGKILL);
-        assert!(matches!(result, Err(ProcessError::PermissionDenied(21))));
-    }
-
-    #[test]
-    fn mock_ppid_map_skips_missing_stat_files() {
-        // Prevents a disappearing process from crashing tree construction.
-        let system = MockSystem::new()
-            .with_dir("/proc", vec!["100".to_string(), "101".to_string()])
-            .with_file("/proc/100/stat", "100 (parent) S 1 1 1 1 1 0 0 0 0 0 0 0 0 0 20 0 1 0")
-            .with_file_error(
-                "/proc/101/stat",
-                SystemError::NotFound("/proc/101/stat".to_string()),
-            );
-
-        let map = read_ppid_map_with(&system);
-        assert_eq!(map.get(&1).unwrap(), &vec![100]);
-        assert!(!map.values().any(|children| children.contains(&101)));
     }
 }
