@@ -17,9 +17,11 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use sysinfo::{CpuExt, PidExt, ProcessExt, ProcessStatus, System, SystemExt};
 
+mod parsers;
 mod process_controller;
 mod system_interface;
 
+use parsers::{parse_parent_pid_from_stat, parse_priority_from_stat, parse_statm_shared_pages};
 use system_interface::{RealSystem, SystemInterface};
 
 const ASSUMED_CPU_PACKAGE_POWER_W: f32 = 65.0;
@@ -306,25 +308,7 @@ fn average_cpu_usage(cpu_per_core: &[f32]) -> f32 {
     }
 }
 
-fn parse_proc_stat_totals(content: &str) -> Option<(u64, u64)> {
-    let cpu_line = content.lines().find(|line| line.starts_with("cpu "))?;
-    let mut fields = cpu_line.split_whitespace();
-    let _cpu = fields.next()?;
-
-    let nums = fields
-        .map(str::parse::<u64>)
-        .collect::<Result<Vec<_>, _>>()
-        .ok()?;
-
-    if nums.len() < 4 {
-        return None;
-    }
-
-    let idle = nums[3].saturating_add(*nums.get(4).unwrap_or(&0));
-    let total = nums.iter().copied().fold(0_u64, u64::saturating_add);
-    Some((total, idle))
-}
-
+#[cfg_attr(not(test), allow(dead_code))]
 fn cpu_usage_percent(prev: (u64, u64), curr: (u64, u64)) -> f32 {
     let total_delta = curr.0.saturating_sub(prev.0);
     if total_delta == 0 {
@@ -334,30 +318,6 @@ fn cpu_usage_percent(prev: (u64, u64), curr: (u64, u64)) -> f32 {
     let idle_delta = curr.1.saturating_sub(prev.1);
     let busy_delta = total_delta.saturating_sub(idle_delta);
     (busy_delta as f64 / total_delta as f64 * 100.0) as f32
-}
-
-fn parse_proc_stat_tail_fields(content: &str) -> Option<Vec<&str>> {
-    let end_comm = content.rfind(") ")?;
-    let tail = &content[end_comm + 2..];
-    Some(tail.split_whitespace().collect::<Vec<_>>())
-}
-
-fn parse_parent_pid_from_stat(content: &str) -> Option<i32> {
-    let fields = parse_proc_stat_tail_fields(content)?;
-    if fields.len() < 2 {
-        return None;
-    }
-    fields[1].parse::<i32>().ok()
-}
-
-fn parse_priority_from_stat(content: &str) -> i64 {
-    let Some(fields) = parse_proc_stat_tail_fields(content) else {
-        return 0;
-    };
-    if fields.len() < 16 {
-        return 0;
-    }
-    fields[15].parse::<i64>().unwrap_or(0)
 }
 
 fn format_power_usage(watts: Option<f32>) -> String {
@@ -386,11 +346,7 @@ fn read_shared_bytes_with<S: SystemInterface + ?Sized>(system: &S, pid: i32, pag
     let Ok(content) = system.read_file(&path) else {
         return 0;
     };
-    let parts = content.split_whitespace().collect::<Vec<_>>();
-    if parts.len() < 3 {
-        return 0;
-    }
-    let Ok(shared_pages) = parts[2].parse::<u64>() else {
+    let Ok(shared_pages) = parse_statm_shared_pages(&content) else {
         return 0;
     };
     shared_pages.saturating_mul(page_size)
@@ -407,7 +363,10 @@ fn read_process_priority_with<S: SystemInterface + ?Sized>(system: &S, pid: i32)
         return 0;
     };
 
-    parse_priority_from_stat(&content)
+    match parse_priority_from_stat(&content) {
+        Ok(priority) => priority,
+        Err(_) => 0,
+    }
 }
 
 fn now_text() -> String {
@@ -425,58 +384,7 @@ fn parse_meminfo() -> Option<MemInfo> {
 
 fn parse_meminfo_with<S: SystemInterface + ?Sized>(system: &S) -> Option<MemInfo> {
     let content = system.read_file("/proc/meminfo").ok()?;
-    parse_meminfo_content(&content)
-}
-
-fn parse_meminfo_content(content: &str) -> Option<MemInfo> {
-    let mut total = 0_u64;
-    let mut free = 0_u64;
-    let mut buffers = 0_u64;
-    let mut cached = 0_u64;
-    let mut sreclaimable = 0_u64;
-    let mut shmem = 0_u64;
-    let mut available = 0_u64;
-
-    for line in content.lines() {
-        let mut parts = line.split(':');
-        let Some(key) = parts.next().map(|v| v.trim()) else {
-            continue;
-        };
-        let Some(val_part) = parts.next().map(|v| v.trim()) else {
-            continue;
-        };
-        let Some(kb_str) = val_part.split_whitespace().next() else {
-            continue;
-        };
-        let Ok(kb) = kb_str.parse::<u64>() else {
-            continue;
-        };
-        let bytes = kb.saturating_mul(1024);
-        match key {
-            "MemTotal" => total = bytes,
-            "MemFree" => free = bytes,
-            "Buffers" => buffers = bytes,
-            "Cached" => cached = bytes,
-            "SReclaimable" => sreclaimable = bytes,
-            "Shmem" => shmem = bytes,
-            "MemAvailable" => available = bytes,
-            _ => {}
-        }
-    }
-
-    if total == 0 {
-        None
-    } else {
-        Some(MemInfo {
-            total,
-            free,
-            buffers,
-            cached,
-            sreclaimable,
-            shmem,
-            available,
-        })
-    }
+    parsers::parse_meminfo(&content).ok()
 }
 
 fn memory_usage_from_meminfo(mi: &MemInfo) -> (u64, u64, f32) {
@@ -717,7 +625,7 @@ fn read_ppid_map_with<S: SystemInterface + ?Sized>(system: &S) -> HashMap<i32, V
         let Ok(stat) = system.read_file(&stat_path) else {
             continue;
         };
-        let Some(ppid) = parse_parent_pid_from_stat(&stat) else {
+        let Ok(ppid) = parse_parent_pid_from_stat(&stat) else {
             continue;
         };
 
@@ -1949,6 +1857,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parsers::{parse_meminfo as parse_meminfo_content, parse_parent_pid_from_stat, parse_priority_from_stat, parse_proc_stat_totals};
     use crate::system_interface::{MockSystem, SystemError};
 
     fn mock_proc(pid: i32, name: &str, cpu: f32, mem: f32, power: Option<f32>) -> ProcRow {
@@ -1985,7 +1894,7 @@ mod tests {
     fn parse_meminfo_content_rejects_missing_total() {
         // Validates invalid input handling when MemTotal is absent.
         let input = "MemFree: 123 kB\nCached: 99 kB\n";
-        assert!(parse_meminfo_content(input).is_none());
+        assert!(parse_meminfo_content(input).is_err());
     }
 
     #[test]
@@ -2046,15 +1955,15 @@ mod tests {
     fn parse_parent_and_priority_from_proc_stat_handle_parentheses_in_comm() {
         // Validates /proc/[pid]/stat parsing when process name contains spaces/parentheses.
         let stat = "1234 (my worker(thread)) S 42 1 1 1 1 0 0 0 0 0 0 0 0 0 20 0 1 0";
-        assert_eq!(parse_parent_pid_from_stat(stat), Some(42));
-        assert_eq!(parse_priority_from_stat(stat), 20);
+        assert_eq!(parse_parent_pid_from_stat(stat).unwrap(), 42);
+        assert_eq!(parse_priority_from_stat(stat).unwrap(), 20);
     }
 
     #[test]
     fn parse_parent_and_priority_from_proc_stat_reject_invalid_input() {
         // Validates invalid /proc/[pid]/stat input handling without panics.
-        assert_eq!(parse_parent_pid_from_stat(""), None);
-        assert_eq!(parse_priority_from_stat("1 (x)"), 0);
+        assert!(parse_parent_pid_from_stat("").is_err());
+        assert!(parse_priority_from_stat("1 (x)").is_err());
     }
 
     #[test]

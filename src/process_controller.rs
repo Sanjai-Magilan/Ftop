@@ -1,3 +1,4 @@
+use crate::parsers::{parse_parent_pid_from_stat, parse_process_status};
 use crate::system_interface::{RealSystem, SystemError, SystemInterface};
 use nix::sys::signal::Signal;
 use std::collections::HashMap;
@@ -63,23 +64,12 @@ impl ProcessController {
     ) -> Result<bool, ProcessError> {
         let status_path = format!("/proc/{}/status", pid);
         let content = system.read_file(&status_path).map_err(|err| map_system_error(pid, err))?;
-        Self::parse_process_status(&content)
-    }
-
-    pub fn parse_process_status(content: &str) -> Result<bool, ProcessError> {
-        for line in content.lines() {
-            if line.starts_with("State:") {
-                let state = line
-                    .split_whitespace()
-                    .nth(1)
-                    .ok_or_else(|| ProcessError::InvalidStatus("Could not parse state".to_string()))?;
-                return Ok(state == "T");
+        parse_process_status(&content).map_err(|err| match err {
+            crate::parsers::ParseError::MissingField(_) | crate::parsers::ParseError::InvalidFormat(_) => {
+                ProcessError::InvalidStatus(err.to_string())
             }
-        }
-
-        Err(ProcessError::InvalidStatus(
-            "State field not found in status content".to_string(),
-        ))
+            crate::parsers::ParseError::InvalidNumber(_) => ProcessError::InvalidStatus(err.to_string()),
+        })
     }
 
     fn send_signal_with<S: SystemInterface + ?Sized>(
@@ -162,7 +152,7 @@ pub fn read_ppid_map_with<S: SystemInterface + ?Sized>(system: &S) -> HashMap<i3
         let Ok(stat) = system.read_file(&stat_path) else {
             continue;
         };
-        let Some(ppid) = parse_parent_pid_from_stat(&stat) else {
+        let Ok(ppid) = parse_parent_pid_from_stat(&stat) else {
             continue;
         };
 
@@ -193,17 +183,7 @@ pub fn read_parent_pid_with<S: SystemInterface + ?Sized>(system: &S, pid: i32) -
 
     let stat_path = format!("/proc/{}/stat", pid);
     let stat = system.read_file(&stat_path).ok()?;
-    parse_parent_pid_from_stat(&stat)
-}
-
-pub fn parse_parent_pid_from_stat(content: &str) -> Option<i32> {
-    let end_comm = content.rfind(") ")?;
-    let tail = &content[end_comm + 2..];
-    let fields = tail.split_whitespace().collect::<Vec<_>>();
-    if fields.len() < 2 {
-        return None;
-    }
-    fields[1].parse::<i32>().ok()
+    parse_parent_pid_from_stat(&stat).ok()
 }
 
 fn find_stopped_ancestor(pid: i32) -> Option<i32> {
@@ -294,6 +274,7 @@ pub fn resume_conflict(pid: i32) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parsers::{parse_parent_pid_from_stat, parse_process_status};
     use crate::system_interface::{MockSystem, SystemError};
     use nix::sys::signal::Signal;
 
@@ -314,15 +295,15 @@ mod tests {
         let stopped = "Name:\ttest\nState:\tT (stopped)\n";
         let running = "Name:\ttest\nState:\tR (running)\n";
 
-        assert!(ProcessController::parse_process_status(stopped).unwrap());
-        assert!(!ProcessController::parse_process_status(running).unwrap());
+        assert!(parse_process_status(stopped).unwrap());
+        assert!(!parse_process_status(running).unwrap());
     }
 
     #[test]
     fn parse_process_status_handles_invalid_input() {
         let bad = "Name: foo\n";
-        match ProcessController::parse_process_status(bad) {
-            Err(ProcessError::InvalidStatus(_)) => {}
+        match parse_process_status(bad) {
+            Err(crate::parsers::ParseError::MissingField(_)) | Err(crate::parsers::ParseError::InvalidFormat(_)) => {}
             other => panic!("expected InvalidStatus, got {:?}", other),
         }
     }
@@ -330,9 +311,9 @@ mod tests {
     #[test]
     fn parse_parent_pid_from_stat_handles_various_inputs() {
         let stat = "1234 (bash) S 42 1 1 1 1 0 0 0 0 0 0 0 0 0 20 0 1 0";
-        assert_eq!(parse_parent_pid_from_stat(stat), Some(42));
-        assert_eq!(parse_parent_pid_from_stat(""), None);
-        assert_eq!(parse_parent_pid_from_stat("1 (x)"), None);
+        assert_eq!(parse_parent_pid_from_stat(stat).unwrap(), 42);
+        assert!(parse_parent_pid_from_stat("").is_err());
+        assert!(parse_parent_pid_from_stat("1 (x)").is_err());
     }
 
     #[test]
