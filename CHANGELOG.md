@@ -2,6 +2,15 @@
 
 All notable changes in this project from the beginning.
 
+## 2026-05-05 (continued)
+
+- Reorganized test suite for production-scale clarity:
+  - Created `src/lib.rs` to expose `parsers`, `process_controller`, and `system_interface` modules for library consumers.
+  - Moved integration tests (6 tests) from source files to dedicated `tests/integration_test.rs` binary.
+  - Kept unit tests (19 tests) in source modules for fast, localized validation.
+  - Updated `Cargo.toml` to define both `[lib]` and `[[bin]]` sections.
+  - Total: 30 passing tests verifying end-to-end metrics collection, MockSystem workflows, and OS abstraction.
+
 ## 2026-05-05
 
 - Updated kill confirmation behavior to show a child-process specific warning message: "this is a child process do u want to kill it".

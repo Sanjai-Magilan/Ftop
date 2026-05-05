@@ -17,6 +17,15 @@ It shows live:
 - Rust toolchain (stable)
 - Linux terminal with UTF-8 support
 
+## Project Structure
+
+SysWatcher is organized as both a binary and library:
+
+- `src/lib.rs` — Exposes reusable modules: `parsers`, `process_controller`, `system_interface`
+- `src/main.rs` — Terminal UI application
+- `tests/integration_test.rs` — Integration tests for MockSystem workflows
+- Total test suite: 30 tests (19 unit tests in modules + 6 integration tests + 5 library tests)
+
 ## Build
 
 ```bash
@@ -97,6 +106,31 @@ cargo run --release -- --refresh 0.5 --top 20
 ### Build errors
 
 - Ensure Rust is installed: `rustc --version` and `cargo --version`.
+
+## Testing
+
+Run the full test suite:
+
+```bash
+cargo test
+```
+
+Run only unit tests (fast):
+
+```bash
+cargo test --lib
+cargo test --bin syswatcher
+```
+
+Run only integration tests:
+
+```bash
+cargo test --test integration_test
+```
+
+The test suite includes:
+- **Unit tests** in source modules: Test parsing logic, metrics computation, sorting, filtering
+- **Integration tests**: Verify MockSystem deterministically simulates OS interactions for full-pipeline testing
 
 ## Project Structure
 
