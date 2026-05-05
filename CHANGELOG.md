@@ -2,6 +2,10 @@
 
 All notable changes in this project from the beginning.
 
+## 2026-05-05
+
+- Updated kill confirmation behavior to show a child-process specific warning message: "this is a child process do u want to kill it".
+
 ## 2026-05-04
 
 - Added a process tree view toggle in the process panel.

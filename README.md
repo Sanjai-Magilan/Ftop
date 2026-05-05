@@ -65,6 +65,7 @@ cargo run --release -- --refresh 0.5 --top 20
 - You must have permission (same user or root) to suspend/resume a process.
 - Use `Enter` to lock the selection on a specific process to keep controlling it even as the list updates.
 - **Selected process state**: The process panel header shows the selected process PID and its current state (RUNNING or STOPPED) for easy visibility.
+- When killing with `x`, selecting a child process shows a dedicated confirmation prompt: "this is a child process do u want to kill it".
 
 ### Process tree view
 
