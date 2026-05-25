@@ -138,3 +138,7 @@ The test suite includes:
 - `Cargo.toml` — Rust dependencies and package metadata
 - `Cargo.lock` — dependency lockfile for reproducible builds
 - `.gitignore` — ignores Rust build output (`target/`) and editor temp files
+
+## Screenshot
+
+![SysWatcher screenshot](./syswatcher.png)

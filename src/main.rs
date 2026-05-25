@@ -30,8 +30,8 @@ const NET_EMA_ALPHA: f64 = 0.35;
 const MIN_NET_DT: f64 = 0.25;
 const UI_POLL_MS: u64 = 50;
 const METER_LABEL_WIDTH: usize = 7;
-const METER_DETAIL_WIDTH: usize = 18;
-const METER_STATIC_WIDTH: usize = METER_LABEL_WIDTH + METER_DETAIL_WIDTH + 55;
+const METER_MIN_BAR_WIDTH: usize = 6;
+const METER_NON_BAR_WIDTH: usize = METER_LABEL_WIDTH + 12;
 const COLOR_APP_BG: Color = Color::Rgb(17, 17, 27);
 const COLOR_PANEL_BG: Color = Color::Rgb(30, 30, 46);
 const COLOR_TEXT: Color = Color::Rgb(205, 214, 244);
@@ -733,8 +733,15 @@ fn truncate_to_width(s: &str, width: usize) -> String {
     s.chars().take(width).collect::<String>()
 }
 
-fn meter_line(label: &str, percent: f32, detail: &str, width: usize) -> Line<'static> {
-    let bar_w = max(10, width.saturating_sub(METER_STATIC_WIDTH));
+fn meter_bar_width(width: usize, detail: &str) -> usize {
+    let detail_w = detail.chars().count();
+    max(
+        METER_MIN_BAR_WIDTH,
+        width.saturating_sub(METER_NON_BAR_WIDTH + detail_w),
+    )
+}
+
+fn meter_line(label: &str, percent: f32, detail: &str, bar_w: usize) -> Line<'static> {
     Line::from(vec![
         Span::styled(
             format!("{:<label_width$} ", label, label_width = METER_LABEL_WIDTH),
@@ -898,15 +905,17 @@ fn render_cpu_panel(frame: &mut Frame, area: TuiRect, metrics: &RuntimeMetrics) 
     let inner_width = area.width.saturating_sub(2) as usize;
     let core_cols = cpu_core_columns(area.width as usize, metrics.cpu_per_core.len());
     let core_col_w = max(13, inner_width / core_cols);
+    let cpu_detail = format!(
+        "load {:.2} {:.2} {:.2}",
+        metrics.load_1, metrics.load_5, metrics.load_15
+    );
+    let cpu_bar_w = meter_bar_width(inner_width, &cpu_detail);
     let mut lines = vec![
         meter_line(
             "Total",
             metrics.cpu_total,
-            &format!(
-                "load {:.2} {:.2} {:.2}",
-                metrics.load_1, metrics.load_5, metrics.load_15
-            ),
-            inner_width,
+            &cpu_detail,
+            cpu_bar_w,
         ),
         Line::from(vec![
             Span::styled("Uptime  ", theme::label_style()),
@@ -939,37 +948,31 @@ fn render_cpu_panel(frame: &mut Frame, area: TuiRect, metrics: &RuntimeMetrics) 
 
 fn render_system_panel(frame: &mut Frame, area: TuiRect, metrics: &RuntimeMetrics) {
     let inner_width = area.width.saturating_sub(2) as usize;
+    let memory_detail = format!(
+        "{}/{}",
+        human_bytes(metrics.mem_used as f64, 2),
+        human_bytes(metrics.mem_total as f64, 2)
+    );
+    let swap_detail = format!(
+        "{}/{}",
+        human_bytes(metrics.swap_used as f64, 1),
+        human_bytes(metrics.swap_total as f64, 1)
+    );
+    let disk_detail = format!(
+        "{}/{}",
+        human_bytes(metrics.disk_used as f64, 1),
+        human_bytes(metrics.disk_total as f64, 1)
+    );
+
+    // Keep separate bar widths per metric so smaller swap/disk values still scale with panel size.
+    let memory_bar_w = meter_bar_width(inner_width, &memory_detail);
+    let swap_bar_w = meter_bar_width(inner_width, &swap_detail);
+    let disk_bar_w = meter_bar_width(inner_width, &disk_detail);
+
     let lines = vec![
-        meter_line(
-            "Memory",
-            metrics.mem_percent,
-            &format!(
-                "{}/{}",
-                human_bytes(metrics.mem_used as f64, 2),
-                human_bytes(metrics.mem_total as f64, 2)
-            ),
-            inner_width,
-        ),
-        meter_line(
-            "Swap",
-            metrics.swap_percent,
-            &format!(
-                "{}/{}",
-                human_bytes(metrics.swap_used as f64, 1),
-                human_bytes(metrics.swap_total as f64, 1)
-            ),
-            inner_width,
-        ),
-        meter_line(
-            "Disk /",
-            metrics.disk_percent,
-            &format!(
-                "{}/{}",
-                human_bytes(metrics.disk_used as f64, 1),
-                human_bytes(metrics.disk_total as f64, 1)
-            ),
-            inner_width,
-        ),
+        meter_line("Memory", metrics.mem_percent, &memory_detail, memory_bar_w),
+        meter_line("Swap", metrics.swap_percent, &swap_detail, swap_bar_w),
+        meter_line("Disk /", metrics.disk_percent, &disk_detail, disk_bar_w),
         Line::from(""),
         Line::from(vec![
             Span::styled("Down ", theme::label_style()),
