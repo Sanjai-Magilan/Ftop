@@ -12,6 +12,10 @@ It shows live:
 - Process list (sorted by CPU, memory, or power)
 - Bottom search/status bar for process filtering and action feedback
 
+## Screenshot
+
+![SysWatcher screenshot](./syswatcher.png)
+
 ## Requirements
 
 - Rust toolchain (stable)
@@ -139,6 +143,4 @@ The test suite includes:
 - `Cargo.lock` — dependency lockfile for reproducible builds
 - `.gitignore` — ignores Rust build output (`target/`) and editor temp files
 
-## Screenshot
 
-![SysWatcher screenshot](./syswatcher.png)
