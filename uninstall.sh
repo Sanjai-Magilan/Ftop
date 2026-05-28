@@ -61,6 +61,7 @@ fi
 if command -v sudo >/dev/null 2>&1; then
   if sudo rm -f "$install_path"; then
     echo "Removed $install_path (via sudo)"
+    echo "Note: you may need to run 'sudo rm -f $install_path' if it still exists after this script finishes"
     exit 0
   else
     echo "error: failed to remove $install_path even with sudo" >&2
