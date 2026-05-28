@@ -14,7 +14,7 @@ It shows live:
 
 ## Screenshot
 
-![SysWatcher screenshot](./syswatcher.png)
+![SysWatcher screenshot](./assets/syswatcher.png)
 
 ## Requirements
 
