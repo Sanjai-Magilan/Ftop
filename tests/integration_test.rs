@@ -1,4 +1,4 @@
-//! Integration tests for SysWatcher
+//! Integration tests for Ftop
 //!
 //! This module contains integration-style tests that verify full pipelines and workflows.
 //! These tests use MockSystem to simulate OS interactions and verify end-to-end functionality.
@@ -6,8 +6,8 @@
 //! Unit tests that verify individual parsing functions or module-specific logic remain
 //! in their respective source modules.
 
-use syswatcher::parsers::{parse_parent_pid_from_stat, parse_process_status};
-use syswatcher::system_interface::{MockSystem, SystemError, SystemInterface};
+use ftop::parsers::{parse_parent_pid_from_stat, parse_process_status};
+use ftop::system_interface::{MockSystem, SystemError, SystemInterface};
 use nix::sys::signal::Signal;
 
 /// Integration test: verifies that MockSystem deterministically provides file reads

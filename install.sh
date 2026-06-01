@@ -6,11 +6,11 @@ usage() {
   cat <<'EOF'
 Usage: ./install.sh [--prefix PATH] [--bin-name NAME]
 
-Builds SysWatcher in release mode and installs the binary to PATH/bin.
+Builds Ftop in release mode and installs the binary to PATH/bin.
 
 Options:
   --prefix PATH   Install prefix directory (default: /usr/local)
-  --bin-name NAME Installed binary name (default: syswatcher)
+  --bin-name NAME Installed binary name (default: ftop)
   -h, --help      Show this help message
 EOF
 }
@@ -18,7 +18,7 @@ EOF
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$script_dir"
 prefix="${PREFIX:-/usr/local}"
-bin_name="syswatcher"
+bin_name="ftop"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -64,13 +64,13 @@ echo "Installing to $install_path"
 if mkdir -p "$install_dir" 2>/dev/null; then
   # Prefer 'install' to set mode, but not all platforms support '-D'
   if install -m755 "$target_bin" "$install_path" 2>/dev/null; then
-    echo "system watcher installed successfully"
+    echo "ftop installed successfully"
     exit 0
   fi
 
   # Fallback to copy + chmod
   if cp "$target_bin" "$install_path" 2>/dev/null && chmod 755 "$install_path" 2>/dev/null; then
-    echo "system watcher installed successfully"
+    echo "ftop installed successfully"
     exit 0
   fi
 fi
@@ -78,12 +78,12 @@ fi
 # Try with sudo if we couldn't write the destination
 if command -v sudo >/dev/null 2>&1; then
   sudo mkdir -p "$install_dir" 2>/dev/null || true
-  if sudo install -m755 "$target_bin" "$install_path" 2>/dev/null; then
-    echo "system watcher installed successfully"
+    if sudo install -m755 "$target_bin" "$install_path" 2>/dev/null; then
+    echo "ftop installed successfully"
     exit 0
   fi
-  if sudo cp "$target_bin" "$install_path" 2>/dev/null && sudo chmod 755 "$install_path" 2>/dev/null; then
-    echo "system watcher installed successfully"
+    if sudo cp "$target_bin" "$install_path" 2>/dev/null && sudo chmod 755 "$install_path" 2>/dev/null; then
+    echo "ftop installed successfully"
     exit 0
   fi
 fi

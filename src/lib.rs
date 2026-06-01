@@ -1,4 +1,4 @@
-//! SysWatcher - A high-performance system monitoring library
+//! Ftop - A high-performance system monitoring library
 //!
 //! This crate provides core functionality for monitoring and controlling processes,
 //! including CPU/memory analysis, process tree management, and system metrics collection.

@@ -1142,7 +1142,7 @@ fn render_dashboard(frame: &mut Frame, app: &mut AppState, metrics: &RuntimeMetr
 
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(" SysWatcher ", theme::title_style().bg(COLOR_APP_BG)),
+            Span::styled(" Ftop ", theme::title_style().bg(COLOR_APP_BG)),
             Span::styled("• ", theme::muted_style().bg(COLOR_APP_BG)),
             Span::styled(metrics.host.clone(), theme::header_style().bg(COLOR_APP_BG)),
             Span::styled(" • ", theme::muted_style().bg(COLOR_APP_BG)),

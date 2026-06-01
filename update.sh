@@ -6,11 +6,11 @@ usage() {
   cat <<'EOF'
 Usage: ./update.sh [--prefix PATH] [--bin-name NAME]
 
-Rebuilds SysWatcher and updates an existing installation in PATH/bin.
+Rebuilds Ftop and updates an existing installation in PATH/bin.
 
 Options:
   --prefix PATH   Install prefix directory (default: /usr/local)
-  --bin-name NAME Installed binary name (default: syswatcher)
+  --bin-name NAME Installed binary name (default: ftop)
   -h, --help      Show this help message
 EOF
 }
@@ -18,7 +18,7 @@ EOF
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$script_dir"
 prefix="${PREFIX:-/usr/local}"
-bin_name="syswatcher"
+bin_name="ftop"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -66,12 +66,12 @@ echo "Updating $install_path"
 
 if mkdir -p "$install_dir" 2>/dev/null; then
   if install -m755 "$target_bin" "$install_path" 2>/dev/null; then
-    echo "system watcher updated successfully"
+    echo "ftop updated successfully"
     exit 0
   fi
 
   if cp "$target_bin" "$install_path" 2>/dev/null && chmod 755 "$install_path" 2>/dev/null; then
-    echo "system watcher updated successfully"
+    echo "ftop updated successfully"
     exit 0
   fi
 fi
@@ -79,11 +79,11 @@ fi
 if command -v sudo >/dev/null 2>&1; then
   sudo mkdir -p "$install_dir" 2>/dev/null || true
   if sudo install -m755 "$target_bin" "$install_path" 2>/dev/null; then
-    echo "system watcher updated successfully"
+    echo "ftop updated successfully"
     exit 0
   fi
   if sudo cp "$target_bin" "$install_path" 2>/dev/null && sudo chmod 755 "$install_path" 2>/dev/null; then
-    echo "system watcher updated successfully"
+    echo "ftop updated successfully"
     exit 0
   fi
 fi

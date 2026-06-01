@@ -6,11 +6,11 @@ usage() {
   cat <<'EOF'
 Usage: ./uninstall.sh [--prefix PATH] [--bin-name NAME]
 
-Removes the installed SysWatcher binary from PATH/bin.
+Removes the installed Ftop binary from PATH/bin.
 
 Options:
   --prefix PATH   Install prefix directory (default: /usr/local)
-  --bin-name NAME Installed binary name (default: syswatcher)
+  --bin-name NAME Installed binary name (default: ftop)
   -h, --help      Show this help message
 EOF
 }
@@ -18,7 +18,7 @@ EOF
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$script_dir"
 prefix="${PREFIX:-/usr/local}"
-bin_name="syswatcher"
+bin_name="ftop"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in

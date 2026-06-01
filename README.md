@@ -1,4 +1,4 @@
-# SysWatcher
+# Ftop
 
 A lightweight, terminal-based system monitor written in Rust.
 
@@ -14,7 +14,7 @@ It shows live:
 
 ## Screenshot
 
-![SysWatcher screenshot](./assets/syswatcher.png)
+![Ftop screenshot](./assets/Ftop.png)
 
 ## Requirements
 
@@ -23,7 +23,7 @@ It shows live:
 
 ## Project Structure
 
-SysWatcher is organized as both a binary and library:
+Ftop is organized as both a binary and library:
 
 - `src/lib.rs` — Exposes reusable modules: `parsers`, `process_controller`, `system_interface`
 - `src/main.rs` — Terminal UI application
@@ -123,7 +123,7 @@ Run only unit tests (fast):
 
 ```bash
 cargo test --lib
-cargo test --bin syswatcher
+cargo test --bin ftop
 ```
 
 Run only integration tests:
