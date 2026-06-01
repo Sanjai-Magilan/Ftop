@@ -36,6 +36,27 @@ Ftop is organized as both a binary and library:
 cargo build --release
 ```
 
+## Install
+
+Install the `ftop` binary to `/usr/local/bin` (default) using the included script:
+
+```bash
+#step 1
+clone this repo
+#step 2
+cd to the repo folder then 
+#step 3
+./install.sh
+# specify a prefix or binary name: (if you want)
+./install.sh --prefix /usr/local --bin-name ftop
+```
+
+Or install via Cargo (places the binary in `~/.cargo/bin`):
+
+```bash
+cargo install --path . --bin ftop --force
+```
+
 ## Run
 
 From the project directory:
